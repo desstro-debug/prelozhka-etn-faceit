@@ -101,7 +101,7 @@ function showHelp(chatId, userId) {
     lines.push("/unban ID — снять бан");
     lines.push("/clearwarn ID — сбросить варны");
     lines.push("/setchat ID — изменить чат публикации");
-    lines.push("Управление админами, техработами и стикером — в /admins");
+    lines.push("Управление админами и техработами — в /admins");
   }
   sendText(chatId, lines.join("\n"));
 }
@@ -495,8 +495,7 @@ function showAdminPanel(chatId, userId) {
     [{ text: "Объявление всем", callback_data: "broadcast" }],
     [{ text: "Забанить", callback_data: "ban" }, { text: "Выдать варн", callback_data: "warn" }],
     [{ text: "Назначить админа", callback_data: "hire_admin" }, { text: "Снять админку", callback_data: "fire_admin" }],
-    [{ text: isMaintenanceEnabled() ? "Выключить техработы" : "Включить техработы", callback_data: "maintenance_toggle" }],
-    [{ text: "Установить стикер", callback_data: "set_sticker" }, { text: "Убрать стикер", callback_data: "clear_sticker" }]
+    [{ text: isMaintenanceEnabled() ? "Выключить техработы" : "Включить техработы", callback_data: "maintenance_toggle" }]
   ];
   sendText(chatId, "<b>Панель администратора</b>\nВыберите действие:", keyboard);
 }
@@ -532,17 +531,6 @@ function handleCallback(query) {
   if (data === "maintenance_toggle") {
     if (!isAdmin(userId)) return sendText(chatId, "Действие доступно только администраторам.");
     return toggleMaintenance(chatId, userId);
-  }
-  if (data === "set_sticker") {
-    if (!isAdmin(userId)) return sendText(chatId, "Действие доступно только администраторам.");
-    setFlow(userId, { type: "set_sticker" });
-    return sendText(chatId, "Отправьте боту стикер, который нужно показывать пользователям. Для отмены отправьте /cancel.");
-  }
-  if (data === "clear_sticker") {
-    if (!isAdmin(userId)) return sendText(chatId, "Действие доступно только администраторам.");
-    PROP.deleteProperty("PUBLIC_STICKER_FILE_ID");
-    auditEvent("public_sticker_removed", userId, "", "Стикер для пользователей удален.");
-    return sendText(chatId, "Стикер отключен.");
   }
   if (data === "hire" || data === "fire" || data === "hire_admin" || data === "fire_admin"
     || data === "ban" || data === "warn" || data === "broadcast") {
@@ -584,19 +572,6 @@ function handleCallback(query) {
 function handleFlowMessage(message, flow) {
   const userId = message.from.id;
   const chatId = message.chat.id;
-  if (flow.type === "set_sticker") {
-    if (!isAdmin(userId)) {
-      clearFlow(userId);
-      return sendText(chatId, "Действие доступно только администраторам.");
-    }
-    const fileId = message.sticker && message.sticker.file_id;
-    if (!fileId) return sendText(chatId, "Это не стикер. Отправьте стикер или /cancel.");
-    PROP.setProperty("PUBLIC_STICKER_FILE_ID", fileId);
-    clearFlow(userId);
-    auditEvent("public_sticker_set", userId, "", "Обновлен стикер для пользователей.");
-    sendText(chatId, "Стикер сохранен и будет добавляться к сообщениям пользователям.");
-    return;
-  }
   const text = String(message.text || "").trim();
   if (!text) return sendText(chatId, "Отправьте текстовым сообщением.");
 
@@ -1033,8 +1008,18 @@ function clearFlow(userId) {
   PROP.deleteProperty("flow_" + userId);
 }
 
-function shouldAttachPublicSticker(chatId, adminUser, moderatorUser) {
-  return /^\d+$/.test(String(chatId)) && !adminUser && !moderatorUser;
+function decoratePublicMessage(text, isPublicUser) {
+  const message = String(text);
+  if (!isPublicUser) return message;
+  const normalized = message.toLowerCase();
+  if (normalized.indexOf("техничес") !== -1 || normalized.indexOf("обновлен") !== -1) return "🛠️ " + message;
+  if (normalized.indexOf("добро пожаловать") !== -1) return "👋 " + message;
+  if (normalized.indexOf("правил") !== -1) return "📜 " + message;
+  if (/отклон|не найден|нельзя|ошиб|ограничен|забан|варн/.test(normalized)) return "⚠️ " + message;
+  if (/одобр|опублик|сохран|отправлена|успеш/.test(normalized)) return "✅ " + message;
+  if (normalized.indexOf("новост") !== -1) return "📰 " + message;
+  if (/отправьте|напишите|пришлите/.test(normalized)) return "✍️ " + message;
+  return "🎮 " + message;
 }
 
 function answerCallback(callbackId) {
@@ -1042,20 +1027,15 @@ function answerCallback(callbackId) {
 }
 
 function sendText(chatId, text, keyboard) {
-  const payload = { chat_id: chatId, text: text, parse_mode: "HTML", disable_web_page_preview: true };
+  const publicUserChat = /^\d+$/.test(String(chatId)) && !isAdmin(chatId) && !isModerator(chatId);
+  const payload = {
+    chat_id: chatId,
+    text: decoratePublicMessage(text, publicUserChat),
+    parse_mode: "HTML",
+    disable_web_page_preview: true
+  };
   if (keyboard) payload.reply_markup = { inline_keyboard: keyboard };
-  const result = telegramRequest_("sendMessage", payload);
-  if (shouldAttachPublicSticker(chatId, isAdmin(chatId), isModerator(chatId))) {
-    const stickerId = PROP.getProperty("PUBLIC_STICKER_FILE_ID");
-    if (stickerId) {
-      try {
-        telegramRequest_("sendSticker", { chat_id: chatId, sticker: stickerId });
-      } catch (error) {
-        console.error("Public sticker delivery failed: " + error);
-      }
-    }
-  }
-  return result;
+  return telegramRequest_("sendMessage", payload);
 }
 
 function telegramRequest_(method, payload) {
@@ -1229,12 +1209,12 @@ function runSelfTests() {
       }
     },
     {
-      name: "Sticker is sent only to public private chats",
+      name: "Public messages receive visual emoji decoration",
       run: function () {
-        assertSelfTestTrue(shouldAttachPublicSticker(12345, false, false));
-        assertSelfTestFalse(shouldAttachPublicSticker(12345, true, false));
-        assertSelfTestFalse(shouldAttachPublicSticker(12345, false, true));
-        assertSelfTestFalse(shouldAttachPublicSticker(-100123, false, false));
+        assertSelfTestTrue(decoratePublicMessage("Добро пожаловать в предложку", true).indexOf("👋 ") === 0);
+        assertSelfTestTrue(decoratePublicMessage("Технический перерыв", true).indexOf("🛠️ ") === 0);
+        assertSelfTestTrue(decoratePublicMessage("Отклонено", true).indexOf("⚠️ ") === 0);
+        assertSelfTestEqual(decoratePublicMessage("Панель администратора", false), "Панель администратора");
       }
     },
     {
