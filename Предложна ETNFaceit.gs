@@ -1,4 +1,5 @@
 const BOT_API = "https://api.telegram.org/bot";
+const WEB_APP_URL = "ВСТАВЬ_СЮДА_URL_ВЕБ-ПРИЛОЖЕНИЯ";
 const PROP = PropertiesService.getScriptProperties();
 const MAX_NEWS_LENGTH = 3000;
 
@@ -846,6 +847,10 @@ function isValidDestination(value) {
   return /^(?:-?\d{1,20}|@[A-Za-z0-9_]{5,})$/.test(String(value));
 }
 
+function isValidWebAppUrl(value) {
+  return /^https:\/\/script\.google\.com\/macros\/s\/[^/?#]+\/exec$/.test(String(value).trim());
+}
+
 function canAccessQueue(isAdminUser, isModeratorUser, status) {
   if (status === "pending_admin" || status === "pending_appeal") return Boolean(isAdminUser);
   if (status === "pending_moderation") return Boolean(isAdminUser || isModeratorUser);
@@ -900,6 +905,22 @@ function telegramRequest(method, payload) {
   const result = JSON.parse(response.getContentText());
   if (!result.ok) throw new Error("Telegram API " + method + ": " + result.description);
   return result;
+}
+
+function configureWebhook() {
+  const webAppUrl = WEB_APP_URL.trim();
+  if (!isValidWebAppUrl(webAppUrl)) {
+    throw new Error("Вставьте URL развернутого Apps Script веб-приложения в WEB_APP_URL в начале файла. URL должен заканчиваться на /exec.");
+  }
+  const result = telegramRequest("setWebhook", { url: webAppUrl });
+  Logger.log("Webhook установлен: " + webAppUrl);
+  return result;
+}
+
+function showWebhookInfo() {
+  const result = telegramRequest("getWebhookInfo", {});
+  Logger.log(JSON.stringify(result.result, null, 2));
+  return result.result;
 }
 
 function escapeHtml(value) {
@@ -963,6 +984,20 @@ function runSelfTests() {
         assertSelfTestFalse(isValidDestination("https://t.me/channel"));
         assertSelfTestFalse(isValidDestination("@ab"));
         assertSelfTestFalse(isValidDestination("-100 chat"));
+      }
+    },
+    {
+      name: "Deployed Apps Script execution URL is accepted",
+      run: function () {
+        assertSelfTestTrue(isValidWebAppUrl("https://script.google.com/macros/s/AbCdEf_123-xyz/exec"));
+      }
+    },
+    {
+      name: "Non-deployment and non-HTTPS URLs are rejected",
+      run: function () {
+        assertSelfTestFalse(isValidWebAppUrl("http://script.google.com/macros/s/id/exec"));
+        assertSelfTestFalse(isValidWebAppUrl("https://script.google.com/macros/s/id/dev"));
+        assertSelfTestFalse(isValidWebAppUrl("https://example.com/exec"));
       }
     },
     {
