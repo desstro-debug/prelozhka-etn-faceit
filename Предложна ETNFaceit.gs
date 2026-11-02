@@ -2,6 +2,7 @@ const BOT_API = "https://api.telegram.org/bot";
 const WEB_APP_URL = "ВСТАВЬ_СЮДА_URL_ВЕБ-ПРИЛОЖЕНИЯ";
 const PROP = PropertiesService.getScriptProperties();
 const MAX_NEWS_LENGTH = 3000;
+const MAX_MEDIA_CAPTION_LENGTH = 900;
 
 function doPost(event) {
   try {
@@ -43,7 +44,9 @@ function handleMessage(message) {
   if (text === "/stats") return showStats(chatId, user.id);
   if (text === "/moderators") return showModerators(chatId, user.id);
   if (text === "/appeals") return showQueue(chatId, user.id, "pending_appeal");
-  if (text === "/audit") return showAuditLog(chatId, user.id);
+  if (text === "/audit" || text.indexOf("/audit ") === 0) {
+    return showAuditLog(chatId, user.id, text.slice(6).trim());
+  }
   if (text.indexOf("/unban ") === 0) return unbanCommand(chatId, user.id, text.slice(7).trim());
   if (text.indexOf("/clearwarn ") === 0) return clearWarnCommand(chatId, user.id, text.slice(11).trim());
   if (text.indexOf("/setchat ") === 0) return setDestinationCommand(chatId, user.id, text.slice(9).trim());
@@ -99,7 +102,8 @@ function showHelp(chatId, userId) {
     lines.push("/stats — статистика предложки");
     lines.push("/moderators — список модераторов");
     lines.push("/appeals — очередь апелляций");
-    lines.push("/audit — журнал действий");
+    lines.push("/audit [фильтр] — журнал действий");
+    lines.push("Фильтры: user:ID, target:ID, action:событие, date:ГГГГ-ММ-ДД или текст");
     lines.push("/find ID или username — найти пользователя");
     lines.push("/unban ID — снять бан");
     lines.push("/clearwarn ID — сбросить варны");
@@ -150,7 +154,9 @@ function showUserSubmission(chatId, userId, submissionId) {
   const text = "<b>Статус:</b> " + escapeHtml(submissionStatusLabel(item.status)) + "\n"
     + "<b>ID:</b> <code>" + escapeHtml(item.id) + "</code>\n"
     + "<b>Отправлено:</b> " + escapeHtml(formatDate(item.createdAt)) + "\n\n"
-    + escapeHtml(item.text);
+    + (item.rejectionReason ? "<b>Причина отказа:</b> " + escapeHtml(item.rejectionReason) + "\n\n" : "")
+    + escapeHtml(item.text || (item.media ? "Медиа без подписи" : ""));
+  if (item.media) sendMediaFile(chatId, item.media, "Вложение к вашей новости");
   sendText(chatId, text, keyboard.length ? keyboard : undefined);
 }
 
@@ -425,22 +431,58 @@ function findUserCommand(chatId, adminId, query) {
   sendText(chatId, output.join("\n"));
 }
 
-function showAuditLog(chatId, userId) {
+function showAuditLog(chatId, userId, filter) {
   if (!isAdmin(userId)) return sendText(chatId, "Команда доступна только администраторам.");
   const properties = PROP.getProperties();
-  const entries = Object.keys(properties).filter(function (key) {
+  const allEntries = Object.keys(properties).filter(function (key) {
     return key.indexOf("audit_") === 0;
   }).map(function (key) {
     try { return JSON.parse(properties[key]); } catch (error) { return null; }
   }).filter(function (entry) { return entry && entry.at; })
-    .sort(function (a, b) { return b.at.localeCompare(a.at); }).slice(0, 20);
-  if (!entries.length) return sendText(chatId, "Журнал пока пуст.");
+    .sort(function (a, b) { return b.at.localeCompare(a.at); });
+  const matched = filterAuditEntries(allEntries, filter);
+  const entries = matched.slice(0, 10);
+  if (!entries.length) return sendText(chatId, filter ? "По этому фильтру записей нет." : "Журнал пока пуст.");
   const lines = entries.map(function (entry) {
     return escapeHtml(formatDate(entry.at)) + " | <b>" + escapeHtml(entry.action) + "</b>\n"
       + "Актор: <code>" + escapeHtml(entry.actorId) + "</code>; цель: <code>"
-      + escapeHtml(entry.targetId || "—") + "</code>\n" + escapeHtml(entry.details || "");
+      + escapeHtml(entry.targetId || "—") + "</code>\n" + escapeHtml(String(entry.details || "").slice(0, 250));
   });
-  sendText(chatId, "<b>Последние действия</b>\n\n" + lines.join("\n\n"));
+  const title = filter ? "<b>Журнал по фильтру:</b> " + escapeHtml(filter)
+    : "<b>Последние действия</b>";
+  sendText(chatId, title + "\nНайдено: " + matched.length + "; показано: " + entries.length
+    + " из 10 последних.\n\n" + lines.join("\n\n"));
+}
+
+function filterAuditEntries(entries, filter) {
+  const query = String(filter || "").trim().toLowerCase();
+  if (!query) return entries;
+  const terms = query.split(/\s+/);
+  return entries.filter(function (entry) {
+    return terms.every(function (term) {
+      const separator = term.indexOf(":");
+      const field = separator === -1 ? "" : term.slice(0, separator);
+      const value = (separator === -1 ? term : term.slice(separator + 1)).trim();
+      if (!value) return true;
+      if (field === "user") {
+        return String(entry.actorId || "").toLowerCase().indexOf(value) !== -1
+          || String(entry.targetId || "").toLowerCase().indexOf(value) !== -1;
+      }
+      if (field === "actor") {
+        return String(entry.actorId || "").toLowerCase().indexOf(value) !== -1;
+      }
+      if (field === "target") {
+        return String(entry.targetId || "").toLowerCase().indexOf(value) !== -1;
+      }
+      if (field === "action") {
+        return String(entry.action || "").toLowerCase().indexOf(value) !== -1;
+      }
+      if (field === "date") return String(entry.at || "").indexOf(value) === 0;
+      const haystack = [entry.action, entry.actorId, entry.targetId, entry.details, entry.at]
+        .join(" ").toLowerCase();
+      return haystack.indexOf(value) !== -1;
+    });
+  });
 }
 
 function auditEvent(action, actorId, targetId, details) {
@@ -552,7 +594,7 @@ function handleCallback(query) {
   if (data === "my_news") return showUserSubmissions(chatId, userId);
   if (data === "submit") {
     setFlow(userId, { type: "submit" });
-    return sendText(chatId, "Отправьте одним сообщением текст новости. Максимум 3000 символов. Для отмены отправьте /cancel.");
+    return sendText(chatId, "Отправьте текст новости или одно фото, видео либо документ с подписью или без нее. Максимум 3000 символов; подпись к медиа — 900. Для отмены отправьте /cancel.");
   }
   if (data === "maintenance_toggle") {
     if (!isAdmin(userId)) return sendText(chatId, "Действие доступно только администраторам.");
@@ -602,10 +644,14 @@ function handleCallback(query) {
   if (data.indexOf("appeal_ok:") === 0) return resolveAppeal(chatId, userId, data.slice(10), true);
   if (data.indexOf("appeal_no:") === 0) return resolveAppeal(chatId, userId, data.slice(10), false);
   if (data.indexOf("m_ok:") === 0) return reviewAsModerator(chatId, userId, data.slice(5), true);
-  if (data.indexOf("m_no:") === 0) return reviewAsModerator(chatId, userId, data.slice(5), false);
+  if (data.indexOf("m_no:") === 0) return showRejectionReasons(chatId, userId, data.slice(5), "mod");
   if (data.indexOf("s_pub:") === 0) return reviewAsSeniorModerator(chatId, userId, data.slice(6));
   if (data.indexOf("a_pub:") === 0) return reviewAsAdmin(chatId, userId, data.slice(6), true);
-  if (data.indexOf("a_no:") === 0) return reviewAsAdmin(chatId, userId, data.slice(5), false);
+  if (data.indexOf("a_no:") === 0) return showRejectionReasons(chatId, userId, data.slice(5), "admin");
+  if (data.indexOf("reject:") === 0) {
+    const parts = data.split(":");
+    return rejectSubmission(chatId, userId, parts[2], parts[1], parts[3]);
+  }
   if (data.indexOf("view_mod:") === 0) return showReviewItem(chatId, userId, data.slice(9), "pending_moderation");
   if (data.indexOf("view_admin:") === 0) return showReviewItem(chatId, userId, data.slice(11), "pending_admin");
   if (data.indexOf("view_appeal:") === 0) return showReviewItem(chatId, userId, data.slice(12), "pending_appeal");
@@ -614,11 +660,15 @@ function handleCallback(query) {
 function handleFlowMessage(message, flow) {
   const userId = message.from.id;
   const chatId = message.chat.id;
-  const text = String(message.text || "").trim();
-  if (!text) return sendText(chatId, "Отправьте текстовым сообщением.");
+  const text = String(message.text || message.caption || "").trim();
+  const media = extractSubmissionMedia(message);
+  if (!text && !(flow.type === "submit" && media)) return sendText(chatId, "Отправьте текст или одно фото, видео либо документ с подписью.");
 
   if (flow.type === "submit") {
     if (text.length > MAX_NEWS_LENGTH) return sendText(chatId, "Текст слишком длинный. Максимум 3000 символов.");
+    if (media && text.length > MAX_MEDIA_CAPTION_LENGTH) {
+      return sendText(chatId, "Подпись к фото, видео или документу должна быть не длиннее 900 символов.");
+    }
     const id = Utilities.getUuid().replace(/-/g, "").slice(0, 12);
     const submission = {
       id: id,
@@ -626,6 +676,7 @@ function handleFlowMessage(message, flow) {
       username: message.from.username || "не указан",
       firstName: message.from.first_name || "",
       text: text,
+      media: media,
       status: "pending_moderation",
       createdAt: new Date().toISOString()
     };
@@ -680,6 +731,49 @@ function handleFlowMessage(message, flow) {
   clearFlow(userId);
 }
 
+function extractSubmissionMedia(message) {
+  if (message.photo && message.photo.length) {
+    return { type: "photo", fileId: message.photo[message.photo.length - 1].file_id };
+  }
+  if (message.video && message.video.file_id) {
+    return { type: "video", fileId: message.video.file_id };
+  }
+  if (message.document && message.document.file_id) {
+    return { type: "document", fileId: message.document.file_id };
+  }
+  return null;
+}
+
+function sendMediaFile(chatId, media, caption) {
+  const methods = { photo: "sendPhoto", video: "sendVideo", document: "sendDocument" };
+  const method = media && methods[media.type];
+  if (!method || !media.fileId) throw new Error("Неизвестный тип вложения.");
+  const payload = { chat_id: chatId };
+  payload[media.type] = media.fileId;
+  if (caption) {
+    payload.caption = caption;
+    payload.parse_mode = "HTML";
+  }
+  return telegramRequest_(method, payload);
+}
+
+function sendSubmissionReview(chatId, item, status, keyboard) {
+  if (item.media) {
+    sendMediaFile(chatId, item.media, "Медиа к новости <code>" + escapeHtml(item.id) + "</code>");
+  }
+  return sendText(chatId, formatSubmission(item, status), keyboard);
+}
+
+function sendSubmissionToChannel(chatId, item) {
+  const body = item.text ? escapeHtml(item.text) : "";
+  const heading = "<b>Новость ETNFaceit</b>";
+  if (!item.media) return sendText(chatId, heading + (body ? "\n\n" + body : ""));
+  const caption = heading + (body ? "\n\n" + body : "");
+  if (caption.length <= 1024) return sendMediaFile(chatId, item.media, caption);
+  sendMediaFile(chatId, item.media, heading);
+  return sendText(chatId, body);
+}
+
 function showQueue(chatId, userId, status, requestedOffset) {
   if (["pending_moderation", "pending_admin", "pending_appeal"].indexOf(status) === -1) {
     return sendText(chatId, "Неизвестный тип очереди.");
@@ -732,7 +826,7 @@ function showReviewItem(chatId, userId, id, expectedStatus) {
       [{ text: "Отклонить", callback_data: "m_no:" + id }, publishAction]
     ];
   }
-  sendText(chatId, formatSubmission(item, expectedStatus), keyboard);
+  sendSubmissionReview(chatId, item, expectedStatus, keyboard);
 }
 
 function startReviewEdit(chatId, userId, submissionId) {
@@ -809,33 +903,96 @@ function confirmReviewEdit(chatId, userId, approved) {
   notifyReviewers(updated, "pending_admin");
 }
 
+function rejectionReasonLabels() {
+  return {
+    offtopic: "Новость не относится к ETNFaceit.",
+    source: "Не хватает источника или подтверждения информации.",
+    rules: "Текст нарушает правила предложки.",
+    spam: "Спам или реклама.",
+    unclear: "Текст непонятен; уточните формулировку."
+  };
+}
+
+function canRejectAtStage(adminUser, seniorUser, moderatorUser, stage) {
+  if (stage === "mod") return Boolean(adminUser || seniorUser || moderatorUser);
+  if (stage === "admin") return Boolean(adminUser || seniorUser);
+  return false;
+}
+
+function showRejectionReasons(chatId, userId, submissionId, stage) {
+  const expectedStatus = stage === "mod" ? "pending_moderation"
+    : stage === "admin" ? "pending_admin" : "";
+  if (!expectedStatus || !canRejectAtStage(isAdmin(userId), isSeniorModerator(userId), isModerator(userId), stage)) {
+    return sendText(chatId, "Нет доступа к отклонению этой новости.");
+  }
+  const item = getSubmission(submissionId);
+  if (!item || item.status !== expectedStatus) return sendText(chatId, "Новость уже обработана.");
+  const reasons = rejectionReasonLabels();
+  const keyboard = [
+    [{ text: "Не по теме", callback_data: "reject:" + stage + ":" + submissionId + ":offtopic" },
+      { text: "Нет источника", callback_data: "reject:" + stage + ":" + submissionId + ":source" }],
+    [{ text: "Нарушение правил", callback_data: "reject:" + stage + ":" + submissionId + ":rules" },
+      { text: "Спам/реклама", callback_data: "reject:" + stage + ":" + submissionId + ":spam" }],
+    [{ text: "Текст непонятен", callback_data: "reject:" + stage + ":" + submissionId + ":unclear" }]
+  ];
+  sendText(chatId, "Выберите причину отказа:\n\n" + Object.keys(reasons).map(function (key) {
+    return "• " + reasons[key];
+  }).join("\n"), keyboard);
+}
+
+function rejectSubmission(chatId, userId, submissionId, stage, reasonKey) {
+  const expectedStatus = stage === "mod" ? "pending_moderation"
+    : stage === "admin" ? "pending_admin" : "";
+  const nextStatus = stage === "mod" ? "rejected_moderation" : "rejected_admin";
+  const reasons = rejectionReasonLabels();
+  const reason = reasons[reasonKey];
+  if (!expectedStatus || !reason
+    || !canRejectAtStage(isAdmin(userId), isSeniorModerator(userId), isModerator(userId), stage)) {
+    return sendText(chatId, "Нет доступа или неизвестная причина отказа.");
+  }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(5000);
+  let item = null;
+  try {
+    item = getSubmission(submissionId);
+    if (item && item.status === expectedStatus) {
+      item.status = nextStatus;
+      item.rejectionReason = reason;
+      item.rejectedAt = new Date().toISOString();
+      item.rejectedBy = String(userId);
+      PROP.setProperty("submission_" + submissionId, JSON.stringify(item));
+    } else {
+      item = null;
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  if (!item) return sendText(chatId, "Новость уже обработана.");
+  auditEvent("submission_rejected", userId, submissionId, reason);
+  sendText(chatId, "Новость отклонена. Причина: " + escapeHtml(reason));
+  try {
+    sendText(item.userId, "<b>Новость отклонена</b>\nПричина: " + escapeHtml(reason) + "\nВы можете подать апелляцию через /mynews.");
+  } catch (error) {
+    console.error("Rejection notification failed: " + error);
+  }
+}
+
 function reviewAsModerator(chatId, userId, id, accepted) {
   if (!isStaff(userId)) return sendText(chatId, "Нет доступа к проверке.");
-  const nextStatus = accepted ? "pending_admin" : "rejected_moderation";
-  const item = transitionSubmission(id, "pending_moderation", nextStatus);
+  if (!accepted) return showRejectionReasons(chatId, userId, id, "mod");
+  const item = transitionSubmission(id, "pending_moderation", "pending_admin");
   if (!item) return sendText(chatId, "Эта новость уже проверена другим модератором.");
-  if (accepted) {
-    sendText(chatId, "Проверка текста пройдена. Новость отправлена администратору на оценку.");
-    notifyReviewers(item, "pending_admin");
-  } else {
-    sendText(chatId, "Новость отклонена по результатам проверки текста.");
-    sendText(item.userId, "Ваш текст не прошел проверку модератора. Проверьте правила: /rules");
-  }
+  sendText(chatId, "Проверка текста пройдена. Новость отправлена администратору на оценку.");
+  notifyReviewers(item, "pending_admin");
 }
 
 function reviewAsAdmin(chatId, userId, id, accepted) {
   if (!isAdmin(userId) && !isSeniorModerator(userId)) {
     return sendText(chatId, "Только старший модератор или администратор может принять это решение.");
   }
+  if (!accepted) return showRejectionReasons(chatId, userId, id, "admin");
   const item = getSubmission(id);
   if (!item || item.status !== "pending_admin") return sendText(chatId, "Эта новость уже проверена или недоступна.");
-  if (!accepted) {
-    const rejected = transitionSubmission(id, "pending_admin", "rejected_admin");
-    if (!rejected) return sendText(chatId, "Эта новость уже обработана.");
-    sendText(chatId, "Новость отклонена.");
-    sendText(item.userId, "Администратор решил не публиковать вашу новость. Спасибо за предложение!");
-    return;
-  }
   return publishSubmission(chatId, userId, id, "pending_admin", null);
 }
 
@@ -855,7 +1012,7 @@ function publishSubmission(chatId, userId, id, expectedStatus, replacementText) 
   const claimed = transitionSubmissionWithText(id, expectedStatus, "publishing", replacementText);
   if (!claimed) return sendText(chatId, "Эта новость уже обрабатывается.");
   try {
-    sendText(destination, "<b>Новость ETNFaceit</b>\n\n" + escapeHtml(claimed.text));
+    sendSubmissionToChannel(destination, claimed);
   } catch (error) {
     transitionSubmission(id, "publishing", expectedStatus);
     console.error(error);
@@ -1125,10 +1282,9 @@ function notifyReviewers(item, status) {
     : getModeratorNotificationIds(getModeratorIds().concat(getSeniorModeratorIds()), getAdminIds());
   const callbackPrefix = status === "pending_admin" ? "view_admin:" : "view_mod:";
   const label = status === "pending_admin" ? "Проверить новость" : "Открыть очередь модерации";
-  const text = formatSubmission(item, status);
   ids.forEach(function (id) {
     try {
-      sendText(id, text, [[{ text: label, callback_data: callbackPrefix + item.id }]]);
+      sendSubmissionReview(id, item, status, [[{ text: label, callback_data: callbackPrefix + item.id }]]);
     } catch (error) {
       console.error("Reviewer notification failed for " + id + ": " + error);
     }
@@ -1141,13 +1297,15 @@ function formatSubmission(item, status) {
   const firstName = item.firstName || profile.firstName || "не указан";
   const usernameValue = item.username && item.username !== "не указан" ? item.username : profile.username;
   const username = usernameValue ? "@" + usernameValue : "не указан (username не задан)";
+  const body = item.text ? escapeHtml(item.text)
+    : item.media ? "<i>Медиа без подписи</i>" : "<i>Текст не указан</i>";
   const stage = status === "pending_admin" ? "Оценка достоверности и пользы"
     : status === "pending_appeal" ? "Рассмотрение апелляции" : "Проверка текста и правил";
   return "<b>Новость на проверке: " + escapeHtml(stage) + "</b>\n"
     + "Отправитель: " + escapeHtml(firstName) + "\n"
     + "Telegram ID: <code>" + escapeHtml(item.userId === undefined ? "не указан" : item.userId) + "</code>\n"
     + "Username: " + escapeHtml(username) + "\n\n"
-    + escapeHtml(item.text)
+    + body
     + (status === "pending_appeal" ? "\n\n<b>Пояснение автора:</b>\n" + escapeHtml(item.appealText || "") : "");
 }
 
@@ -1424,6 +1582,20 @@ function runSelfTests() {
       }
     },
     {
+      name: "Photo, video and document attachments are extracted",
+      run: function () {
+        assertSelfTestArrayEqual(
+          extractSubmissionMedia({ photo: [{ file_id: "small" }, { file_id: "large" }] }),
+          { type: "photo", fileId: "large" }
+        );
+        assertSelfTestArrayEqual(extractSubmissionMedia({ video: { file_id: "video-id" } }),
+          { type: "video", fileId: "video-id" });
+        assertSelfTestArrayEqual(extractSubmissionMedia({ document: { file_id: "doc-id" } }),
+          { type: "document", fileId: "doc-id" });
+        assertSelfTestEqual(extractSubmissionMedia({ sticker: { file_id: "sticker-id" } }), null);
+      }
+    },
+    {
       name: "Admin IDs are parsed and deduplicated",
       run: function () {
         assertSelfTestArrayEqual(parseAdminIds("123, 456\n123 invalid"), ["123", "456"]);
@@ -1449,6 +1621,15 @@ function runSelfTests() {
         assertSelfTestTrue(canAccessQueue(false, true, "pending_moderation"));
         assertSelfTestFalse(canAccessQueue(false, true, "pending_admin"));
         assertSelfTestFalse(canAccessQueue(false, true, "pending_appeal"));
+      }
+    },
+    {
+      name: "Rejection permissions follow the review stage",
+      run: function () {
+        assertSelfTestTrue(canRejectAtStage(false, false, true, "mod"));
+        assertSelfTestFalse(canRejectAtStage(false, false, true, "admin"));
+        assertSelfTestTrue(canRejectAtStage(false, true, false, "admin"));
+        assertSelfTestEqual(rejectionReasonLabels().offtopic, "Новость не относится к ETNFaceit.");
       }
     },
     {
@@ -1546,6 +1727,34 @@ function runSelfTests() {
         assertSelfTestTrue(card.indexOf("<code>12345</code>") !== -1);
         assertSelfTestTrue(card.indexOf("@faceit_player") !== -1);
         assertSelfTestTrue(card.indexOf("Игрок") !== -1);
+      }
+    },
+    {
+      name: "Audit filter searches actions, users, targets and dates",
+      run: function () {
+        const entries = [
+          { id: "a", action: "news_published", actorId: "10", targetId: "story-1", details: "Channel post", at: "2026-11-02T12:00:00Z" },
+          { id: "b", action: "user_warned", actorId: "20", targetId: "10", details: "Warn 1/3", at: "2026-11-01T12:00:00Z" }
+        ];
+        assertSelfTestEqual(filterAuditEntries(entries, "action:published")[0].id, "a");
+        assertSelfTestEqual(filterAuditEntries(entries, "user:10").length, 2);
+        assertSelfTestEqual(filterAuditEntries(entries, "target:story-1")[0].id, "a");
+        assertSelfTestEqual(filterAuditEntries(entries, "date:2026-11-02")[0].id, "a");
+        assertSelfTestEqual(filterAuditEntries(entries, "channel")[0].id, "a");
+      }
+    },
+    {
+      name: "Submission card explains media without a caption",
+      run: function () {
+        const card = formatSubmission({
+          id: "media-1",
+          userId: 12345,
+          firstName: "Игрок",
+          username: "faceit_player",
+          text: "",
+          media: { type: "photo", fileId: "photo-id" }
+        }, "pending_moderation");
+        assertSelfTestTrue(card.indexOf("Медиа без подписи") !== -1);
       }
     },
     {
