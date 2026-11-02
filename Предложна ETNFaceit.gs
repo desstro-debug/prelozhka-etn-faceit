@@ -91,6 +91,9 @@ function showHelp(chatId, userId) {
   if (isModerator(userId) || isAdmin(userId)) {
     lines.push("/moder — открыть панель модератора");
   }
+  if (isSeniorModerator(userId)) {
+    lines.push("/moder — открыть панель старшего модератора");
+  }
   if (isAdmin(userId)) {
     lines.push("/admins — открыть панель администратора");
     lines.push("/stats — статистика предложки");
@@ -470,14 +473,24 @@ function countKeys(properties, prefix) {
 function getModeratorIds() {
   const properties = PROP.getProperties();
   return Object.keys(properties).filter(function (key) {
-    return key.indexOf("moderator_") === 0 && properties[key] === "1";
+    if (key.indexOf("moderator_") !== 0 || properties[key] !== "1") return false;
+    const userId = key.slice(10);
+    return !isAdmin(userId) && !isSeniorModerator(userId);
   }).map(function (key) { return key.slice(10); });
+}
+
+function getSeniorModeratorIds() {
+  return parseAdminIds(PROP.getProperty("SENIOR_MODERATOR_IDS") || "");
+}
+
+function saveSeniorModeratorIds(ids) {
+  PROP.setProperty("SENIOR_MODERATOR_IDS", parseAdminIds(ids.join(",")).join(","));
 }
 
 function getModeratorNotificationIds(moderatorIds, adminIds) {
   const admins = adminIds.map(String);
-  return moderatorIds.map(String).filter(function (id) {
-    return admins.indexOf(id) === -1;
+  return moderatorIds.map(String).filter(function (id, index, ids) {
+    return admins.indexOf(id) === -1 && ids.indexOf(id) === index;
   });
 }
 
@@ -495,19 +508,31 @@ function showAdminPanel(chatId, userId) {
     [{ text: "Объявление всем", callback_data: "broadcast" }],
     [{ text: "Забанить", callback_data: "ban" }, { text: "Выдать варн", callback_data: "warn" }],
     [{ text: "Назначить админа", callback_data: "hire_admin" }, { text: "Снять админку", callback_data: "fire_admin" }],
+    [{ text: "Назначить старшего", callback_data: "hire_senior" }, { text: "Снять старшего", callback_data: "fire_senior" }],
     [{ text: isMaintenanceEnabled() ? "Выключить техработы" : "Включить техработы", callback_data: "maintenance_toggle" }]
   ];
   sendText(chatId, "<b>Панель администратора</b>\nВыберите действие:", keyboard);
 }
 
 function showModeratorPanel(chatId, userId) {
-  if (!isModerator(userId) && !isAdmin(userId)) {
+  if (!isModerator(userId) && !isSeniorModerator(userId) && !isAdmin(userId)) {
     return sendText(chatId, "Команда доступна только модераторам.");
   }
-  sendText(chatId, "<b>Панель модератора</b>\nПроверьте понятность текста и соответствие правилам. Решение о публикации принимает администратор.", [
+  const keyboard = [
     [{ text: "Очередь новостей", callback_data: "mod_queue" }],
     [{ text: "Правила", callback_data: "rules" }]
-  ]);
+  ];
+  if (isSeniorModerator(userId)) {
+    keyboard.push([
+      { text: "Нанять помощника", callback_data: "hire_helper" },
+      { text: "Уволить помощника", callback_data: "fire_helper" }
+    ]);
+    keyboard.push([{ text: "Очередь публикации", callback_data: "admin_queue" }]);
+  }
+  const description = isSeniorModerator(userId)
+    ? "Старший модератор может проверять и публиковать новости, а также управлять своими помощниками."
+    : "Проверьте понятность текста и соответствие правилам. Публикацию подтверждает старший модератор или администратор.";
+  sendText(chatId, "<b>Панель модератора</b>\n" + description, keyboard);
 }
 
 function handleCallback(query) {
@@ -533,13 +558,21 @@ function handleCallback(query) {
     return toggleMaintenance(chatId, userId);
   }
   if (data === "hire" || data === "fire" || data === "hire_admin" || data === "fire_admin"
+    || data === "hire_senior" || data === "fire_senior" || data === "hire_helper" || data === "fire_helper"
     || data === "ban" || data === "warn" || data === "broadcast") {
-    if (!isAdmin(userId)) return sendText(chatId, "Действие доступно только администраторам.");
+    const adminAction = ["hire", "fire", "hire_admin", "fire_admin", "hire_senior", "fire_senior", "ban", "warn", "broadcast"].indexOf(data) !== -1;
+    const helperAction = data === "hire_helper" || data === "fire_helper";
+    if (adminAction && !isAdmin(userId)) return sendText(chatId, "Действие доступно только администраторам.");
+    if (helperAction && !isSeniorModerator(userId)) return sendText(chatId, "Только старший модератор может управлять помощниками.");
     const prompts = {
       hire: "Отправьте Telegram ID пользователя, которого нужно назначить модератором.",
       fire: "Отправьте Telegram ID модератора, которого нужно снять.",
       hire_admin: "Отправьте Telegram ID пользователя, которому нужно выдать права администратора.",
       fire_admin: "Отправьте Telegram ID администратора, у которого нужно снять права.",
+      hire_senior: "Отправьте Telegram ID пользователя, которого нужно назначить старшим модератором.",
+      fire_senior: "Отправьте Telegram ID старшего модератора, которого нужно снять.",
+      hire_helper: "Отправьте Telegram ID помощника, которого нужно назначить модератором.",
+      fire_helper: "Отправьте Telegram ID своего помощника, которого нужно снять.",
       ban: "Отправьте Telegram ID пользователя для бана.",
       warn: "Отправьте Telegram ID пользователя для выдачи варна.",
       broadcast: "Отправьте текст объявления для всех пользователей бота. Для отмены отправьте /cancel."
@@ -556,12 +589,16 @@ function handleCallback(query) {
   }
   if (data.indexOf("user_view:") === 0) return showUserSubmission(chatId, userId, data.slice(10));
   if (data.indexOf("user_edit:") === 0) return startEditSubmission(chatId, userId, data.slice(10));
+  if (data.indexOf("edit_review:") === 0) return startReviewEdit(chatId, userId, data.slice(12));
+  if (data === "edit_confirm_yes") return confirmReviewEdit(chatId, userId, true);
+  if (data === "edit_confirm_no") return confirmReviewEdit(chatId, userId, false);
   if (data.indexOf("user_cancel:") === 0) return cancelUserSubmission(chatId, userId, data.slice(12));
   if (data.indexOf("user_appeal:") === 0) return startAppeal(chatId, userId, data.slice(12));
   if (data.indexOf("appeal_ok:") === 0) return resolveAppeal(chatId, userId, data.slice(10), true);
   if (data.indexOf("appeal_no:") === 0) return resolveAppeal(chatId, userId, data.slice(10), false);
   if (data.indexOf("m_ok:") === 0) return reviewAsModerator(chatId, userId, data.slice(5), true);
   if (data.indexOf("m_no:") === 0) return reviewAsModerator(chatId, userId, data.slice(5), false);
+  if (data.indexOf("s_pub:") === 0) return reviewAsSeniorModerator(chatId, userId, data.slice(6));
   if (data.indexOf("a_pub:") === 0) return reviewAsAdmin(chatId, userId, data.slice(6), true);
   if (data.indexOf("a_no:") === 0) return reviewAsAdmin(chatId, userId, data.slice(5), false);
   if (data.indexOf("view_mod:") === 0) return showReviewItem(chatId, userId, data.slice(9), "pending_moderation");
@@ -601,6 +638,19 @@ function handleFlowMessage(message, flow) {
   if (flow.type === "edit_news") {
     return editUserSubmission(chatId, userId, flow.submissionId, text);
   }
+  if (flow.type === "review_edit") {
+    return prepareReviewEdit(chatId, userId, flow, text);
+  }
+
+  if (flow.type === "hire_helper" || flow.type === "fire_helper") {
+    if (!isSeniorModerator(userId)) {
+      clearFlow(userId);
+      return sendText(chatId, "Только старший модератор может управлять помощниками.");
+    }
+    if (!/^\d+$/.test(text)) return sendText(chatId, "Нужен числовой Telegram ID.");
+    if (flow.type === "hire_helper") return hireHelper(chatId, userId, text);
+    return fireHelper(chatId, userId, text);
+  }
 
   if (!isAdmin(userId)) {
     clearFlow(userId);
@@ -618,6 +668,8 @@ function handleFlowMessage(message, flow) {
   if (flow.type === "fire") return fireModerator(chatId, userId, targetId);
   if (flow.type === "hire_admin") return hireAdmin(chatId, userId, targetId);
   if (flow.type === "fire_admin") return fireAdmin(chatId, userId, targetId);
+  if (flow.type === "hire_senior") return hireSeniorModerator(chatId, userId, targetId);
+  if (flow.type === "fire_senior") return fireSeniorModerator(chatId, userId, targetId);
   if (flow.type === "ban") return banUser(chatId, userId, targetId, "Бан выдан администратором.");
   if (flow.type === "warn") return warnUser(chatId, userId, targetId);
   clearFlow(userId);
@@ -627,7 +679,7 @@ function showQueue(chatId, userId, status, requestedOffset) {
   if (["pending_moderation", "pending_admin", "pending_appeal"].indexOf(status) === -1) {
     return sendText(chatId, "Неизвестный тип очереди.");
   }
-  if (!canAccessQueue(isAdmin(userId), isModerator(userId), status)) {
+  if (!canAccessQueue(isAdmin(userId), isModerator(userId), status, isSeniorModerator(userId))) {
     return sendText(chatId, "Нет доступа к этой очереди.");
   }
   const allItems = getSubmissions(status);
@@ -650,24 +702,110 @@ function showQueue(chatId, userId, status, requestedOffset) {
 }
 
 function showReviewItem(chatId, userId, id, expectedStatus) {
-  if (!canAccessQueue(isAdmin(userId), isModerator(userId), expectedStatus)) {
+  const adminUser = isAdmin(userId);
+  const seniorUser = isSeniorModerator(userId);
+  const moderatorUser = isModerator(userId);
+  if (!canAccessQueue(adminUser, moderatorUser, expectedStatus, seniorUser)) {
     return sendText(chatId, "Нет доступа к этой новости.");
   }
   const item = getSubmission(id);
   if (!item || item.status !== expectedStatus) return sendText(chatId, "Эта новость уже проверена или недоступна.");
   let keyboard;
   if (expectedStatus === "pending_admin") {
-    keyboard = [[{ text: "Опубликовать", callback_data: "a_pub:" + id }, { text: "Отклонить", callback_data: "a_no:" + id }]];
+    keyboard = [
+      [{ text: "Редактировать", callback_data: "edit_review:" + id }],
+      [{ text: "Опубликовать", callback_data: "a_pub:" + id }, { text: "Отклонить", callback_data: "a_no:" + id }]
+    ];
   } else if (expectedStatus === "pending_appeal") {
     keyboard = [[{ text: "Вернуть в проверку", callback_data: "appeal_ok:" + id }, { text: "Оставить отказ", callback_data: "appeal_no:" + id }]];
   } else {
-    keyboard = [[{ text: "Отклонить", callback_data: "m_no:" + id }, { text: "Отправить администратору", callback_data: "m_ok:" + id }]];
+    const publishAction = adminUser || seniorUser
+      ? { text: "Опубликовать", callback_data: "s_pub:" + id }
+      : { text: "Отправить администратору", callback_data: "m_ok:" + id };
+    keyboard = [
+      [{ text: "Редактировать", callback_data: "edit_review:" + id }],
+      [{ text: "Отклонить", callback_data: "m_no:" + id }, publishAction]
+    ];
   }
   sendText(chatId, formatSubmission(item, expectedStatus), keyboard);
 }
 
+function startReviewEdit(chatId, userId, submissionId) {
+  const item = getSubmission(submissionId);
+  if (!item || !canAccessQueue(isAdmin(userId), isModerator(userId), item.status, isSeniorModerator(userId))) {
+    return sendText(chatId, "Нет доступа к редактированию этой новости.");
+  }
+  if (item.status !== "pending_moderation" && item.status !== "pending_admin") {
+    return sendText(chatId, "Эту новость уже нельзя редактировать.");
+  }
+  setFlow(userId, { type: "review_edit", submissionId: submissionId, sourceStatus: item.status });
+  sendText(chatId, "Отправьте новый полный текст новости. После этого покажу предпросмотр и подтверждение публикации.");
+}
+
+function prepareReviewEdit(chatId, userId, flow, replacementText) {
+  if (replacementText.length > MAX_NEWS_LENGTH) {
+    return sendText(chatId, "Текст слишком длинный. Максимум 3000 символов.");
+  }
+  const item = getSubmission(flow.submissionId);
+  if (!item || item.status !== flow.sourceStatus
+    || !canAccessQueue(isAdmin(userId), isModerator(userId), item.status, isSeniorModerator(userId))) {
+    clearFlow(userId);
+    return sendText(chatId, "Статус новости изменился или у вас больше нет доступа. Откройте очередь заново.");
+  }
+  PROP.setProperty("review_edit_draft_" + userId, JSON.stringify({
+    submissionId: flow.submissionId,
+    sourceStatus: flow.sourceStatus,
+    text: replacementText,
+    createdAt: new Date().toISOString()
+  }));
+  clearFlow(userId);
+  const question = reviewerEditConfirmation(isAdmin(userId), isSeniorModerator(userId));
+  const keyboard = [[
+    { text: "Да", callback_data: "edit_confirm_yes" },
+    { text: "Нет", callback_data: "edit_confirm_no" }
+  ]];
+  sendText(chatId, "<b>Предпросмотр новости</b>\n\n" + escapeHtml(replacementText)
+    + "\n\n" + question, keyboard);
+}
+
+function confirmReviewEdit(chatId, userId, approved) {
+  const draftKey = "review_edit_draft_" + userId;
+  const value = PROP.getProperty(draftKey);
+  if (!value) return sendText(chatId, "Черновик редактирования не найден. Откройте новость заново.");
+  let draft;
+  try { draft = JSON.parse(value); } catch (error) {
+    PROP.deleteProperty(draftKey);
+    return sendText(chatId, "Черновик поврежден. Откройте новость заново.");
+  }
+  if (!approved) {
+    PROP.deleteProperty(draftKey);
+    return sendText(chatId, "Редактирование отменено. Новость не отправлена.");
+  }
+  if (!canAccessQueue(isAdmin(userId), isModerator(userId), draft.sourceStatus, isSeniorModerator(userId))) {
+    PROP.deleteProperty(draftKey);
+    return sendText(chatId, "Нет доступа к этой новости.");
+  }
+  const item = getSubmission(draft.submissionId);
+  if (!item || item.status !== draft.sourceStatus) {
+    PROP.deleteProperty(draftKey);
+    return sendText(chatId, "Новость уже обработана. Подтверждение отменено.");
+  }
+
+  PROP.deleteProperty(draftKey);
+  if (canPublishDirectly(isAdmin(userId), isSeniorModerator(userId))) {
+    return publishSubmission(chatId, userId, draft.submissionId, draft.sourceStatus, draft.text);
+  }
+  const updated = transitionSubmissionWithText(
+    draft.submissionId, draft.sourceStatus, "pending_admin", draft.text
+  );
+  if (!updated) return sendText(chatId, "Новость уже обработана. Откройте очередь заново.");
+  auditEvent("moderator_edited_for_admin", userId, draft.submissionId, "Отредактированная новость передана администратору.");
+  sendText(chatId, "Отредактированная новость передана администратору на подтверждение.");
+  notifyReviewers(updated, "pending_admin");
+}
+
 function reviewAsModerator(chatId, userId, id, accepted) {
-  if (!isAdmin(userId) && !isModerator(userId)) return sendText(chatId, "Нет доступа к проверке.");
+  if (!isStaff(userId)) return sendText(chatId, "Нет доступа к проверке.");
   const nextStatus = accepted ? "pending_admin" : "rejected_moderation";
   const item = transitionSubmission(id, "pending_moderation", nextStatus);
   if (!item) return sendText(chatId, "Эта новость уже проверена другим модератором.");
@@ -681,7 +819,9 @@ function reviewAsModerator(chatId, userId, id, accepted) {
 }
 
 function reviewAsAdmin(chatId, userId, id, accepted) {
-  if (!isAdmin(userId)) return sendText(chatId, "Только администратор может принять это решение.");
+  if (!isAdmin(userId) && !isSeniorModerator(userId)) {
+    return sendText(chatId, "Только старший модератор или администратор может принять это решение.");
+  }
   const item = getSubmission(id);
   if (!item || item.status !== "pending_admin") return sendText(chatId, "Эта новость уже проверена или недоступна.");
   if (!accepted) {
@@ -691,29 +831,46 @@ function reviewAsAdmin(chatId, userId, id, accepted) {
     sendText(item.userId, "Администратор решил не публиковать вашу новость. Спасибо за предложение!");
     return;
   }
+  return publishSubmission(chatId, userId, id, "pending_admin", null);
+}
 
+function reviewAsSeniorModerator(chatId, userId, id) {
+  if (!isAdmin(userId) && !isSeniorModerator(userId)) {
+    return sendText(chatId, "Только старший модератор или администратор может публиковать напрямую.");
+  }
+  return publishSubmission(chatId, userId, id, "pending_moderation", null);
+}
+
+function publishSubmission(chatId, userId, id, expectedStatus, replacementText) {
+  if (!canPublishDirectly(isAdmin(userId), isSeniorModerator(userId))) {
+    return sendText(chatId, "Нет прав для прямой публикации.");
+  }
   const destination = PROP.getProperty("DESTINATION_CHAT_ID");
   if (!isValidDestination(destination)) return sendText(chatId, "Не настроен корректный DESTINATION_CHAT_ID.");
-  const claimed = transitionSubmission(id, "pending_admin", "publishing");
+  const claimed = transitionSubmissionWithText(id, expectedStatus, "publishing", replacementText);
   if (!claimed) return sendText(chatId, "Эта новость уже обрабатывается.");
   try {
-    sendText(destination, "<b>Новость ETNFaceit</b>\n\n" + escapeHtml(item.text));
-    transitionSubmission(id, "publishing", "published");
-    sendText(chatId, "Новость опубликована в настроенный чат.");
-    sendText(item.userId, "Ваша новость одобрена администратором и опубликована. Спасибо!");
+    sendText(destination, "<b>Новость ETNFaceit</b>\n\n" + escapeHtml(claimed.text));
   } catch (error) {
-    transitionSubmission(id, "publishing", "pending_admin");
+    transitionSubmission(id, "publishing", expectedStatus);
     console.error(error);
     sendText(chatId, "Не удалось отправить новость в чат. Проверьте ID чата и права бота.");
+    return;
   }
+  transitionSubmission(id, "publishing", "published");
+  auditEvent("news_published", userId, id, "Новость опубликована напрямую в " + destination);
+  sendText(chatId, "Новость опубликована в канал.");
+  try { sendText(claimed.userId, "Ваша новость опубликована. Спасибо!"); }
+  catch (error) { console.error("Author notification failed: " + error); }
 }
 
 function hireModerator(chatId, adminId, targetId) {
-  if (String(adminId) === targetId || isAdmin(targetId)) {
+  if (String(adminId) === targetId || isAdmin(targetId) || isSeniorModerator(targetId)) {
     clearFlow(adminId);
-    return sendText(chatId, "Администратор не может быть назначен модератором.");
+    return sendText(chatId, "Администраторов и старших модераторов нельзя назначить обычными модераторами.");
   }
   PROP.setProperty("moderator_" + targetId, "1");
+  PROP.deleteProperty("moderator_owner_" + targetId);
   clearFlow(adminId);
   sendText(chatId, "Пользователь " + targetId + " назначен модератором.");
   sendText(targetId, "Вам выданы права модератора предложки ETNFaceit. Панель: /moder");
@@ -726,8 +883,84 @@ function fireModerator(chatId, adminId, targetId) {
   }
   const existed = PROP.getProperty("moderator_" + targetId);
   PROP.deleteProperty("moderator_" + targetId);
+  PROP.deleteProperty("moderator_owner_" + targetId);
   clearFlow(adminId);
   sendText(chatId, existed ? "Права модератора сняты у " + targetId + "." : "Этот пользователь не был модератором.");
+}
+
+function hireSeniorModerator(chatId, adminId, targetId) {
+  if (!isValidTelegramId(targetId) || isAdmin(targetId)) {
+    clearFlow(adminId);
+    return sendText(chatId, "Укажите корректный Telegram ID не-администратора.");
+  }
+  const seniorIds = getSeniorModeratorIds();
+  if (seniorIds.indexOf(String(targetId)) !== -1) {
+    clearFlow(adminId);
+    return sendText(chatId, "Этот пользователь уже старший модератор.");
+  }
+  seniorIds.push(String(targetId));
+  saveSeniorModeratorIds(seniorIds);
+  PROP.deleteProperty("moderator_" + targetId);
+  PROP.deleteProperty("moderator_owner_" + targetId);
+  clearFlow(adminId);
+  auditEvent("senior_moderator_hired", adminId, targetId, "Назначен старший модератор.");
+  sendText(chatId, "Пользователь " + targetId + " назначен старшим модератором.");
+  try { sendText(targetId, "Вам выданы права старшего модератора ETNFaceit. Панель: /moder"); }
+  catch (error) { console.error("Senior moderator notification failed: " + error); }
+}
+
+function fireSeniorModerator(chatId, adminId, targetId) {
+  const seniorIds = getSeniorModeratorIds();
+  if (seniorIds.indexOf(String(targetId)) === -1) {
+    clearFlow(adminId);
+    return sendText(chatId, "Этот пользователь не является старшим модератором.");
+  }
+  saveSeniorModeratorIds(seniorIds.filter(function (id) { return id !== String(targetId); }));
+  const helpers = getModeratorIds().filter(function (id) {
+    return PROP.getProperty("moderator_owner_" + id) === String(targetId);
+  });
+  helpers.forEach(function (id) {
+    PROP.deleteProperty("moderator_" + id);
+    PROP.deleteProperty("moderator_owner_" + id);
+  });
+  clearFlow(adminId);
+  auditEvent("senior_moderator_fired", adminId, targetId, "Снята роль старшего; сняты помощники: " + helpers.length + ".");
+  sendText(chatId, "Права старшего модератора сняты. Помощников снято: " + helpers.length + ".");
+  try { sendText(targetId, "Ваши права старшего модератора ETNFaceit сняты."); }
+  catch (error) { console.error("Senior moderator removal notification failed: " + error); }
+}
+
+function hireHelper(chatId, seniorId, targetId) {
+  if (!isValidTelegramId(targetId) || String(seniorId) === String(targetId)
+    || isAdmin(targetId) || isSeniorModerator(targetId)) {
+    clearFlow(seniorId);
+    return sendText(chatId, "Укажите корректный ID пользователя, который не имеет старшей роли.");
+  }
+  if (isModerator(targetId)) {
+    clearFlow(seniorId);
+    return sendText(chatId, "Этот пользователь уже модератор.");
+  }
+  PROP.setProperty("moderator_" + targetId, "1");
+  PROP.setProperty("moderator_owner_" + targetId, String(seniorId));
+  clearFlow(seniorId);
+  auditEvent("helper_hired", seniorId, targetId, "Назначен помощник старшего модератора.");
+  sendText(chatId, "Пользователь " + targetId + " назначен вашим модератором-помощником.");
+  try { sendText(targetId, "Вам выданы права модератора-помощника ETNFaceit. Панель: /moder"); }
+  catch (error) { console.error("Helper notification failed: " + error); }
+}
+
+function fireHelper(chatId, seniorId, targetId) {
+  if (PROP.getProperty("moderator_owner_" + targetId) !== String(seniorId)) {
+    clearFlow(seniorId);
+    return sendText(chatId, "Этот пользователь не является вашим помощником.");
+  }
+  PROP.deleteProperty("moderator_" + targetId);
+  PROP.deleteProperty("moderator_owner_" + targetId);
+  clearFlow(seniorId);
+  auditEvent("helper_fired", seniorId, targetId, "Снят модератор-помощник.");
+  sendText(chatId, "Права модератора-помощника сняты у " + targetId + ".");
+  try { sendText(targetId, "Ваши права модератора-помощника ETNFaceit сняты."); }
+  catch (error) { console.error("Helper removal notification failed: " + error); }
 }
 
 function hireAdmin(chatId, actingAdminId, targetId) {
@@ -803,7 +1036,17 @@ function isMaintenanceEnabled() {
 }
 
 function isStaff(userId) {
-  return isAdmin(userId) || isModerator(userId);
+  return isAdmin(userId) || isSeniorModerator(userId) || isModerator(userId);
+}
+
+function canPublishDirectly(adminUser, seniorUser) {
+  return Boolean(adminUser || seniorUser);
+}
+
+function reviewerEditConfirmation(adminUser, seniorUser) {
+  return canPublishDirectly(adminUser, seniorUser)
+    ? "Уверены, что хотите отправить эту версию в канал?"
+    : "Передать эту отредактированную новость администратору?";
 }
 
 function shouldBlockForMaintenance(enabled, staff) {
@@ -874,7 +1117,7 @@ function broadcastMessage(adminId, text) {
 
 function notifyReviewers(item, status) {
   const ids = status === "pending_admin" ? getAdminIds()
-    : getModeratorNotificationIds(getModeratorIds(), getAdminIds());
+    : getModeratorNotificationIds(getModeratorIds().concat(getSeniorModeratorIds()), getAdminIds());
   const callbackPrefix = status === "pending_admin" ? "view_admin:" : "view_mod:";
   const label = status === "pending_admin" ? "Проверить новость" : "Открыть очередь модерации";
   const text = formatSubmission(item, status);
@@ -934,6 +1177,25 @@ function transitionSubmission(id, expectedStatus, nextStatus) {
   }
 }
 
+function transitionSubmissionWithText(id, expectedStatus, nextStatus, replacementText) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(5000);
+  try {
+    const item = getSubmission(id);
+    if (!item || item.status !== expectedStatus) return null;
+    if (typeof replacementText === "string") {
+      item.text = replacementText;
+      item.editedAt = new Date().toISOString();
+      item.version = Number(item.version || 1) + 1;
+    }
+    item.status = nextStatus;
+    PROP.setProperty("submission_" + id, JSON.stringify(item));
+    return item;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function rememberUser(userOrId) {
   const isObject = userOrId && typeof userOrId === "object";
   const userId = isObject ? userOrId.id : userOrId;
@@ -976,9 +1238,10 @@ function isValidWebhookUrl(value) {
   return /^https:\/\/[^\s/?#]+(?:\/[^\s?#]*)?(?:\?[^\s#]*)?$/.test(String(value).trim());
 }
 
-function canAccessQueue(isAdminUser, isModeratorUser, status) {
-  if (status === "pending_admin" || status === "pending_appeal") return Boolean(isAdminUser);
-  if (status === "pending_moderation") return Boolean(isAdminUser || isModeratorUser);
+function canAccessQueue(isAdminUser, isModeratorUser, status, isSeniorUser) {
+  if (status === "pending_appeal") return Boolean(isAdminUser);
+  if (status === "pending_admin") return Boolean(isAdminUser || isSeniorUser);
+  if (status === "pending_moderation") return Boolean(isAdminUser || isSeniorUser || isModeratorUser);
   return false;
 }
 
@@ -987,7 +1250,11 @@ function isAdmin(userId) {
 }
 
 function isModerator(userId) {
-  return PROP.getProperty("moderator_" + userId) === "1";
+  return PROP.getProperty("moderator_" + userId) === "1" && !isAdmin(userId) && !isSeniorModerator(userId);
+}
+
+function isSeniorModerator(userId) {
+  return getSeniorModeratorIds().indexOf(String(userId)) !== -1;
 }
 
 function isBanned(userId) {
@@ -1177,6 +1444,31 @@ function runSelfTests() {
         assertSelfTestTrue(canAccessQueue(false, true, "pending_moderation"));
         assertSelfTestFalse(canAccessQueue(false, true, "pending_admin"));
         assertSelfTestFalse(canAccessQueue(false, true, "pending_appeal"));
+      }
+    },
+    {
+      name: "Senior moderator can publish but cannot resolve appeals",
+      run: function () {
+        assertSelfTestTrue(canAccessQueue(false, false, "pending_moderation", true));
+        assertSelfTestTrue(canAccessQueue(false, false, "pending_admin", true));
+        assertSelfTestFalse(canAccessQueue(false, false, "pending_appeal", true));
+        assertSelfTestFalse(canAccessQueue(false, true, "pending_admin", false));
+      }
+    },
+    {
+      name: "Only admins and senior moderators publish directly",
+      run: function () {
+        assertSelfTestTrue(canPublishDirectly(true, false));
+        assertSelfTestTrue(canPublishDirectly(false, true));
+        assertSelfTestFalse(canPublishDirectly(false, false));
+      }
+    },
+    {
+      name: "Edit confirmation text follows the reviewer's role",
+      run: function () {
+        assertSelfTestTrue(reviewerEditConfirmation(false, false).indexOf("администратору") !== -1);
+        assertSelfTestTrue(reviewerEditConfirmation(false, true).indexOf("в канал") !== -1);
+        assertSelfTestTrue(reviewerEditConfirmation(true, false).indexOf("в канал") !== -1);
       }
     },
     {
