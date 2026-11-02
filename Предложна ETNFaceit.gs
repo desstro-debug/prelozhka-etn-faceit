@@ -469,6 +469,13 @@ function getModeratorIds() {
   }).map(function (key) { return key.slice(10); });
 }
 
+function getModeratorNotificationIds(moderatorIds, adminIds) {
+  const admins = adminIds.map(String);
+  return moderatorIds.map(String).filter(function (id) {
+    return admins.indexOf(id) === -1;
+  });
+}
+
 function getUserProfile(userId) {
   const value = PROP.getProperty("user_profile_" + userId);
   if (!value) return null;
@@ -635,7 +642,7 @@ function showReviewItem(chatId, userId, id, expectedStatus) {
   } else if (expectedStatus === "pending_appeal") {
     keyboard = [[{ text: "Вернуть в проверку", callback_data: "appeal_ok:" + id }, { text: "Оставить отказ", callback_data: "appeal_no:" + id }]];
   } else {
-    keyboard = [[{ text: "Текст нормальный", callback_data: "m_ok:" + id }, { text: "Отклонить", callback_data: "m_no:" + id }]];
+    keyboard = [[{ text: "Отклонить", callback_data: "m_no:" + id }, { text: "Отправить администратору", callback_data: "m_ok:" + id }]];
   }
   sendText(chatId, formatSubmission(item, expectedStatus), keyboard);
 }
@@ -754,10 +761,8 @@ function broadcastMessage(adminId, text) {
 }
 
 function notifyReviewers(item, status) {
-  const properties = PROP.getProperties();
-  const ids = status === "pending_admin" ? getAdminIds() : Object.keys(properties)
-    .filter(function (key) { return key.indexOf("moderator_") === 0; })
-    .map(function (key) { return key.slice(10); });
+  const ids = status === "pending_admin" ? getAdminIds()
+    : getModeratorNotificationIds(getModeratorIds(), getAdminIds());
   const callbackPrefix = status === "pending_admin" ? "view_admin:" : "view_mod:";
   const label = status === "pending_admin" ? "Проверить новость" : "Открыть очередь модерации";
   const text = formatSubmission(item, status);
@@ -771,12 +776,16 @@ function notifyReviewers(item, status) {
 }
 
 function formatSubmission(item, status) {
-  const username = item.username && item.username !== "не указан" ? "@" + item.username : "не указан";
+  const needsProfile = !item.firstName || !item.username || item.username === "не указан";
+  const profile = needsProfile ? getUserProfile(item.userId) || {} : {};
+  const firstName = item.firstName || profile.firstName || "не указан";
+  const usernameValue = item.username && item.username !== "не указан" ? item.username : profile.username;
+  const username = usernameValue ? "@" + usernameValue : "не указан (username не задан)";
   const stage = status === "pending_admin" ? "Оценка достоверности и пользы"
     : status === "pending_appeal" ? "Рассмотрение апелляции" : "Проверка текста и правил";
   return "<b>Новость на проверке: " + escapeHtml(stage) + "</b>\n"
-    + "Отправитель: " + escapeHtml(item.firstName || "") + "\n"
-    + "Telegram ID: <code>" + escapeHtml(item.userId) + "</code>\n"
+    + "Отправитель: " + escapeHtml(firstName) + "\n"
+    + "Telegram ID: <code>" + escapeHtml(item.userId === undefined ? "не указан" : item.userId) + "</code>\n"
     + "Username: " + escapeHtml(username) + "\n\n"
     + escapeHtml(item.text)
     + (status === "pending_appeal" ? "\n\n<b>Пояснение автора:</b>\n" + escapeHtml(item.appealText || "") : "");
@@ -1051,6 +1060,29 @@ function runSelfTests() {
       run: function () {
         assertSelfTestEqual(submissionStatusLabel("pending_moderation"), "На проверке у модератора");
         assertSelfTestEqual(submissionStatusLabel("published"), "Опубликована");
+      }
+    },
+    {
+      name: "Admins are excluded from first-stage moderator notifications",
+      run: function () {
+        assertSelfTestArrayEqual(
+          getModeratorNotificationIds(["101", "202", "303"], ["202", "404"]),
+          ["101", "303"]
+        );
+      }
+    },
+    {
+      name: "Submission card includes sender ID and username",
+      run: function () {
+        const card = formatSubmission({
+          userId: 12345,
+          firstName: "Игрок",
+          username: "faceit_player",
+          text: "Тестовая новость"
+        }, "pending_moderation");
+        assertSelfTestTrue(card.indexOf("<code>12345</code>") !== -1);
+        assertSelfTestTrue(card.indexOf("@faceit_player") !== -1);
+        assertSelfTestTrue(card.indexOf("Игрок") !== -1);
       }
     },
     {
