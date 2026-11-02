@@ -1,0 +1,32 @@
+const GAS_EXEC_URL = "ВСТАВЬ_СЮДА_URL_APPS_SCRIPT_EXEC";
+
+export default {
+  async fetch(request) {
+    if (request.method !== "POST") {
+      return new Response("Worker online");
+    }
+
+    try {
+      const body = await request.text();
+      const upstream = await fetch(GAS_EXEC_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        redirect: "follow"
+      });
+
+      const responseText = await upstream.text();
+      console.log("Apps Script status:", upstream.status);
+      console.log("Apps Script response:", responseText.slice(0, 500));
+
+      if (!upstream.ok) {
+        return new Response("Apps Script error", { status: 502 });
+      }
+
+      return new Response("ok");
+    } catch (error) {
+      console.error("Forwarding failed:", error);
+      return new Response("Forwarding failed", { status: 502 });
+    }
+  }
+};
