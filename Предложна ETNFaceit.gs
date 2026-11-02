@@ -41,6 +41,7 @@ function handleMessage(message) {
   if (text === "/mynews") return showUserSubmissions(chatId, user.id);
   if (text === "/admins") return showAdminPanel(chatId, user.id);
   if (text === "/moder") return showModeratorPanel(chatId, user.id);
+  if (text === "/senior") return showSeniorPanel(chatId, user.id);
   if (text === "/stats") return showStats(chatId, user.id);
   if (text === "/moderators") return showModerators(chatId, user.id);
   if (text === "/appeals") return showQueue(chatId, user.id, "pending_appeal");
@@ -95,7 +96,7 @@ function showHelp(chatId, userId) {
     lines.push("/moder — открыть панель модератора");
   }
   if (isSeniorModerator(userId)) {
-    lines.push("/moder — открыть панель старшего модератора");
+    lines.push("/senior — открыть панель старшего модератора");
   }
   if (isAdmin(userId)) {
     lines.push("/admins — открыть панель администратора");
@@ -552,12 +553,18 @@ function showAdminPanel(chatId, userId) {
     [{ text: "Назначить админа", callback_data: "hire_admin" }, { text: "Снять админку", callback_data: "fire_admin" }],
     [{ text: "Назначить старшего", callback_data: "hire_senior" }, { text: "Снять старшего", callback_data: "fire_senior" }],
     [{ text: isMaintenanceEnabled() ? "Выключить техработы" : "Включить техработы", callback_data: "maintenance_toggle" }],
-    [{ text: "Автоматизация · SOON", callback_data: "automation_soon" }]
+    [{ text: "Автоматизация · SOON", callback_data: "automation_soon" }],
+    [{ text: isSubmissionsPaused() ? "▶️ Возобновить приём" : "⏸️ Пауза приёма", callback_data: "toggle_submissions" }],
+    [{ text: isPublishingPaused() ? "▶️ Возобновить публикации" : "🧊 Пауза публикаций", callback_data: "toggle_publishing" }],
+    [{ text: "📊 Сводка очередей", callback_data: "queue_summary" }],
+    [{ text: "🆘 Сигнал команде", callback_data: "staff_alert" }],
+    [{ text: "🩺 Проверка бота", callback_data: "bot_health" }]
   ];
   sendText(chatId, "<b>Панель администратора</b>\nВыберите действие:", keyboard);
 }
 
 function showModeratorPanel(chatId, userId) {
+  if (isSeniorModerator(userId)) return showSeniorPanel(chatId, userId);
   if (!isModerator(userId) && !isSeniorModerator(userId) && !isAdmin(userId)) {
     return sendText(chatId, "Команда доступна только модераторам.");
   }
@@ -565,17 +572,20 @@ function showModeratorPanel(chatId, userId) {
     [{ text: "Очередь новостей", callback_data: "mod_queue" }],
     [{ text: "Правила", callback_data: "rules" }]
   ];
-  if (isSeniorModerator(userId)) {
-    keyboard.push([
-      { text: "Нанять помощника", callback_data: "hire_helper" },
-      { text: "Уволить помощника", callback_data: "fire_helper" }
-    ]);
-    keyboard.push([{ text: "Очередь публикации", callback_data: "admin_queue" }]);
+  sendText(chatId, "<b>Панель модератора</b>\nПроверьте понятность текста и соответствие правилам. Публикацию подтверждает старший модератор или администратор.", keyboard);
+}
+
+function showSeniorPanel(chatId, userId) {
+  if (!isSeniorModerator(userId) && !isAdmin(userId)) {
+    return sendText(chatId, "Команда доступна только старшим модераторам.");
   }
-  const description = isSeniorModerator(userId)
-    ? "Старший модератор может проверять и публиковать новости, а также управлять своими помощниками."
-    : "Проверьте понятность текста и соответствие правилам. Публикацию подтверждает старший модератор или администратор.";
-  sendText(chatId, "<b>Панель модератора</b>\n" + description, keyboard);
+  const keyboard = [
+    [{ text: "Очередь модерации", callback_data: "mod_queue" }],
+    [{ text: "Очередь публикации", callback_data: "senior_admin_queue" }],
+    [{ text: "Нанять помощника", callback_data: "hire_helper" }, { text: "Уволить помощника", callback_data: "fire_helper" }],
+    [{ text: "Правила", callback_data: "rules" }]
+  ];
+  sendText(chatId, "<b>Панель старшего модератора</b>\nПроверяйте новости, управляйте своей командой и публикуйте после проверки.", keyboard);
 }
 
 function handleCallback(query) {
@@ -593,6 +603,7 @@ function handleCallback(query) {
   if (data === "rules") return sendText(chatId, rulesText());
   if (data === "my_news") return showUserSubmissions(chatId, userId);
   if (data === "submit") {
+    if (!canAcceptSubmissions(isSubmissionsPaused())) return sendText(chatId, "Приём новостей временно приостановлен. Попробуйте позже.");
     setFlow(userId, { type: "submit" });
     return sendText(chatId, "Отправьте текст новости или одно фото, видео либо документ с подписью или без нее. Максимум 3000 символов; подпись к медиа — 900. Для отмены отправьте /cancel.");
   }
@@ -603,6 +614,17 @@ function handleCallback(query) {
   if (data === "automation_soon") {
     if (!isAdmin(userId)) return sendText(chatId, "Действие доступно только администраторам.");
     return sendText(chatId, "Автоматизация скоро появится. Пока ничего не запускается.");
+  }
+  if (["toggle_submissions", "toggle_publishing", "queue_summary", "staff_alert", "bot_health"].indexOf(data) !== -1) {
+    if (!isAdmin(userId)) return sendText(chatId, "Действие доступно только администраторам.");
+    if (data === "toggle_submissions") return toggleSubmissionPause(chatId, userId);
+    if (data === "toggle_publishing") return togglePublishingPause(chatId, userId);
+    if (data === "queue_summary") return showQueueSummary(chatId, userId);
+    if (data === "staff_alert") {
+      setFlow(userId, { type: "staff_alert" });
+      return sendText(chatId, "Отправьте текст срочного сообщения только для команды. Для отмены отправьте /cancel.");
+    }
+    return showBotHealth(chatId, userId);
   }
   if (data === "hire" || data === "fire" || data === "hire_admin" || data === "fire_admin"
     || data === "hire_senior" || data === "fire_senior" || data === "hire_helper" || data === "fire_helper"
@@ -627,7 +649,7 @@ function handleCallback(query) {
     setFlow(userId, { type: data });
     return sendText(chatId, prompts[data]);
   }
-  if (data === "admin_queue") return showQueue(chatId, userId, "pending_admin");
+  if (data === "admin_queue" || data === "senior_admin_queue") return showQueue(chatId, userId, "pending_admin");
   if (data === "mod_queue" || data === "mod_work") return showQueue(chatId, userId, "pending_moderation");
   if (data === "appeal_queue") return showQueue(chatId, userId, "pending_appeal");
   if (data.indexOf("queue_page:") === 0) {
@@ -665,6 +687,10 @@ function handleFlowMessage(message, flow) {
   if (!text && !(flow.type === "submit" && media)) return sendText(chatId, "Отправьте текст или одно фото, видео либо документ с подписью.");
 
   if (flow.type === "submit") {
+    if (!canAcceptSubmissions(isSubmissionsPaused())) {
+      clearFlow(userId);
+      return sendText(chatId, "Приём новостей временно приостановлен. Ваша заявка не отправлена.");
+    }
     if (text.length > MAX_NEWS_LENGTH) return sendText(chatId, "Текст слишком длинный. Максимум 3000 символов.");
     if (media && text.length > MAX_MEDIA_CAPTION_LENGTH) {
       return sendText(chatId, "Подпись к фото, видео или документу должна быть не длиннее 900 символов.");
@@ -696,6 +722,15 @@ function handleFlowMessage(message, flow) {
   }
   if (flow.type === "review_edit") {
     return prepareReviewEdit(chatId, userId, flow, text);
+  }
+  if (flow.type === "staff_alert") {
+    if (!isAdmin(userId)) {
+      clearFlow(userId);
+      return sendText(chatId, "Действие доступно только администраторам.");
+    }
+    if (text.length > 3000) return sendText(chatId, "Сообщение команде должно быть короче 3000 символов.");
+    clearFlow(userId);
+    return sendStaffAlert(chatId, userId, text);
   }
 
   if (flow.type === "hire_helper" || flow.type === "fire_helper") {
@@ -1007,6 +1042,9 @@ function publishSubmission(chatId, userId, id, expectedStatus, replacementText) 
   if (!canPublishDirectly(isAdmin(userId), isSeniorModerator(userId))) {
     return sendText(chatId, "Нет прав для прямой публикации.");
   }
+  if (!canPublish(isPublishingPaused())) {
+    return sendText(chatId, "Публикации в канал временно заморожены. Новость осталась в очереди.");
+  }
   const destination = PROP.getProperty("DESTINATION_CHAT_ID");
   if (!isValidDestination(destination)) return sendText(chatId, "Не настроен корректный DESTINATION_CHAT_ID.");
   const claimed = transitionSubmissionWithText(id, expectedStatus, "publishing", replacementText);
@@ -1226,6 +1264,91 @@ function getAdminRemovalError(adminIds, actingAdminId, targetId) {
 function maintenanceMessage(enabled) {
   if (enabled === false) return "Технические работы завершены. Бот снова работает, можете отправлять новости.";
   return "Технический перерыв: заливается обновление. Попробуйте воспользоваться ботом немного позже.";
+}
+
+function isSubmissionsPaused() {
+  return PROP.getProperty("SUBMISSIONS_PAUSED") === "1";
+}
+
+function isPublishingPaused() {
+  return PROP.getProperty("PUBLISHING_PAUSED") === "1";
+}
+
+function canAcceptSubmissions(paused) {
+  return !paused;
+}
+
+function canPublish(paused) {
+  return !paused;
+}
+
+function toggleSubmissionPause(chatId, adminId) {
+  const paused = !isSubmissionsPaused();
+  PROP.setProperty("SUBMISSIONS_PAUSED", paused ? "1" : "0");
+  auditEvent("submission_intake_toggled", adminId, "", paused ? "Приём приостановлен." : "Приём возобновлен.");
+  sendText(chatId, paused
+    ? "Приём новых заявок остановлен. Уже созданные новости остаются в очереди."
+    : "Приём новых заявок возобновлён.");
+}
+
+function togglePublishingPause(chatId, adminId) {
+  const paused = !isPublishingPaused();
+  PROP.setProperty("PUBLISHING_PAUSED", paused ? "1" : "0");
+  auditEvent("publishing_toggled", adminId, "", paused ? "Публикации заморожены." : "Публикации возобновлены.");
+  sendText(chatId, paused
+    ? "Публикации в канал заморожены. Очереди и проверки продолжают работать."
+    : "Публикации в канал возобновлены.");
+}
+
+function showQueueSummary(chatId, adminId) {
+  if (!isAdmin(adminId)) return sendText(chatId, "Действие доступно только администраторам.");
+  const statuses = ["pending_moderation", "pending_admin", "pending_appeal"];
+  const counts = {};
+  statuses.forEach(function (status) { counts[status] = getSubmissions(status); });
+  const oldest = counts.pending_moderation.concat(counts.pending_admin)
+    .sort(function (a, b) { return a.createdAt < b.createdAt ? -1 : 1; })[0];
+  const text = "<b>Сводка очередей</b>\n"
+    + "Модерация: " + counts.pending_moderation.length + "\n"
+    + "Публикация: " + counts.pending_admin.length + "\n"
+    + "Апелляции: " + counts.pending_appeal.length + "\n"
+    + "Приём: " + (isSubmissionsPaused() ? "приостановлен" : "работает") + "\n"
+    + "Публикации: " + (isPublishingPaused() ? "заморожены" : "работают") + "\n"
+    + "Старейшая открытая заявка: " + (oldest ? formatDate(oldest.createdAt) : "нет");
+  sendText(chatId, text);
+}
+
+function sendStaffAlert(chatId, adminId, message) {
+  const staffIds = getAdminIds().concat(getSeniorModeratorIds(), getModeratorIds())
+    .map(String).filter(function (id, index, ids) { return ids.indexOf(id) === index; });
+  let delivered = 0;
+  let failed = 0;
+  const text = "<b>Срочный сигнал от администратора</b>\n\n" + escapeHtml(message);
+  staffIds.forEach(function (staffId) {
+    try { sendText(staffId, text); delivered++; }
+    catch (error) { failed++; console.error("Staff alert failed for " + staffId + ": " + error); }
+  });
+  auditEvent("staff_alert_sent", adminId, "", "Доставлено: " + delivered + "; ошибок: " + failed + ".");
+  sendText(chatId, "Сигнал отправлен команде. Доставлено: " + delivered + "; ошибок: " + failed + ".");
+}
+
+function showBotHealth(chatId, adminId) {
+  if (!isAdmin(adminId)) return sendText(chatId, "Действие доступно только администраторам.");
+  let webhookLine = "Webhook: ошибка запроса";
+  try {
+    const result = telegramRequest_("getWebhookInfo", {}).result || {};
+    webhookLine = "Webhook: " + (result.url ? "установлен" : "не установлен")
+      + "; ожидает: " + Number(result.pending_update_count || 0);
+    if (result.last_error_message) webhookLine += "\nПоследняя ошибка: " + escapeHtml(result.last_error_message).slice(0, 300);
+  } catch (error) {
+    webhookLine += " (" + escapeHtml(String(error).slice(0, 200)) + ")";
+  }
+  const text = "<b>Проверка бота</b>\n"
+    + webhookLine + "\n"
+    + "Токен: " + (PROP.getProperty("BOT_TOKEN") ? "задан" : "не задан") + "\n"
+    + "Канал: " + (isValidDestination(PROP.getProperty("DESTINATION_CHAT_ID")) ? "настроен" : "не настроен") + "\n"
+    + "Старших модераторов: " + getSeniorModeratorIds().length + "\n"
+    + "Помощников-модераторов: " + getModeratorIds().length;
+  sendText(chatId, text);
 }
 
 function banUser(chatId, adminId, targetId, reason) {
@@ -1677,6 +1800,15 @@ function runSelfTests() {
         assertSelfTestTrue(shouldBlockForMaintenance(true, false));
         assertSelfTestFalse(shouldBlockForMaintenance(true, true));
         assertSelfTestFalse(shouldBlockForMaintenance(false, false));
+      }
+    },
+    {
+      name: "Submission and publishing pauses are independent",
+      run: function () {
+        assertSelfTestFalse(canAcceptSubmissions(true));
+        assertSelfTestTrue(canAcceptSubmissions(false));
+        assertSelfTestFalse(canPublish(true));
+        assertSelfTestTrue(canPublish(false));
       }
     },
     {
