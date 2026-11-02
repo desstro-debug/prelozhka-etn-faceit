@@ -509,7 +509,8 @@ function showAdminPanel(chatId, userId) {
     [{ text: "Забанить", callback_data: "ban" }, { text: "Выдать варн", callback_data: "warn" }],
     [{ text: "Назначить админа", callback_data: "hire_admin" }, { text: "Снять админку", callback_data: "fire_admin" }],
     [{ text: "Назначить старшего", callback_data: "hire_senior" }, { text: "Снять старшего", callback_data: "fire_senior" }],
-    [{ text: isMaintenanceEnabled() ? "Выключить техработы" : "Включить техработы", callback_data: "maintenance_toggle" }]
+    [{ text: isMaintenanceEnabled() ? "Выключить техработы" : "Включить техработы", callback_data: "maintenance_toggle" }],
+    [{ text: "Автоматизация · SOON", callback_data: "automation_soon" }]
   ];
   sendText(chatId, "<b>Панель администратора</b>\nВыберите действие:", keyboard);
 }
@@ -556,6 +557,10 @@ function handleCallback(query) {
   if (data === "maintenance_toggle") {
     if (!isAdmin(userId)) return sendText(chatId, "Действие доступно только администраторам.");
     return toggleMaintenance(chatId, userId);
+  }
+  if (data === "automation_soon") {
+    if (!isAdmin(userId)) return sendText(chatId, "Действие доступно только администраторам.");
+    return sendText(chatId, "Автоматизация скоро появится. Пока ничего не запускается.");
   }
   if (data === "hire" || data === "fire" || data === "hire_admin" || data === "fire_admin"
     || data === "hire_senior" || data === "fire_senior" || data === "hire_helper" || data === "fire_helper"
