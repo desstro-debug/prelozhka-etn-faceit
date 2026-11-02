@@ -27,6 +27,10 @@ function handleMessage(message) {
     sendText(chatId, "Доступ к предложке ограничен.");
     return;
   }
+  if (shouldBlockForMaintenance(isMaintenanceEnabled(), isStaff(user.id))) {
+    sendText(chatId, maintenanceMessage());
+    return;
+  }
 
   const text = String(message.text || "").trim();
   if (text === "/start") return showStart(chatId);
@@ -97,6 +101,7 @@ function showHelp(chatId, userId) {
     lines.push("/unban ID — снять бан");
     lines.push("/clearwarn ID — сбросить варны");
     lines.push("/setchat ID — изменить чат публикации");
+    lines.push("Управление админами, техработами и стикером — в /admins");
   }
   sendText(chatId, lines.join("\n"));
 }
@@ -488,7 +493,10 @@ function showAdminPanel(chatId, userId) {
     [{ text: "Нанять модератора", callback_data: "hire" }, { text: "Уволить модератора", callback_data: "fire" }],
     [{ text: "Проверить новости", callback_data: "admin_queue" }, { text: "Работа модератора", callback_data: "mod_work" }],
     [{ text: "Объявление всем", callback_data: "broadcast" }],
-    [{ text: "Забанить", callback_data: "ban" }, { text: "Выдать варн", callback_data: "warn" }]
+    [{ text: "Забанить", callback_data: "ban" }, { text: "Выдать варн", callback_data: "warn" }],
+    [{ text: "Назначить админа", callback_data: "hire_admin" }, { text: "Снять админку", callback_data: "fire_admin" }],
+    [{ text: isMaintenanceEnabled() ? "Выключить техработы" : "Включить техработы", callback_data: "maintenance_toggle" }],
+    [{ text: "Установить стикер", callback_data: "set_sticker" }, { text: "Убрать стикер", callback_data: "clear_sticker" }]
   ];
   sendText(chatId, "<b>Панель администратора</b>\nВыберите действие:", keyboard);
 }
@@ -510,6 +518,9 @@ function handleCallback(query) {
   answerCallback(query.id);
 
   if (isBanned(userId)) return sendText(chatId, "Доступ к предложке ограничен.");
+  if (shouldBlockForMaintenance(isMaintenanceEnabled(), isStaff(userId))) {
+    return sendText(chatId, maintenanceMessage());
+  }
   const data = String(query.data || "");
 
   if (data === "rules") return sendText(chatId, rulesText());
@@ -518,11 +529,29 @@ function handleCallback(query) {
     setFlow(userId, { type: "submit" });
     return sendText(chatId, "Отправьте одним сообщением текст новости. Максимум 3000 символов. Для отмены отправьте /cancel.");
   }
-  if (data === "hire" || data === "fire" || data === "ban" || data === "warn" || data === "broadcast") {
+  if (data === "maintenance_toggle") {
+    if (!isAdmin(userId)) return sendText(chatId, "Действие доступно только администраторам.");
+    return toggleMaintenance(chatId, userId);
+  }
+  if (data === "set_sticker") {
+    if (!isAdmin(userId)) return sendText(chatId, "Действие доступно только администраторам.");
+    setFlow(userId, { type: "set_sticker" });
+    return sendText(chatId, "Отправьте боту стикер, который нужно показывать пользователям. Для отмены отправьте /cancel.");
+  }
+  if (data === "clear_sticker") {
+    if (!isAdmin(userId)) return sendText(chatId, "Действие доступно только администраторам.");
+    PROP.deleteProperty("PUBLIC_STICKER_FILE_ID");
+    auditEvent("public_sticker_removed", userId, "", "Стикер для пользователей удален.");
+    return sendText(chatId, "Стикер отключен.");
+  }
+  if (data === "hire" || data === "fire" || data === "hire_admin" || data === "fire_admin"
+    || data === "ban" || data === "warn" || data === "broadcast") {
     if (!isAdmin(userId)) return sendText(chatId, "Действие доступно только администраторам.");
     const prompts = {
       hire: "Отправьте Telegram ID пользователя, которого нужно назначить модератором.",
       fire: "Отправьте Telegram ID модератора, которого нужно снять.",
+      hire_admin: "Отправьте Telegram ID пользователя, которому нужно выдать права администратора.",
+      fire_admin: "Отправьте Telegram ID администратора, у которого нужно снять права.",
       ban: "Отправьте Telegram ID пользователя для бана.",
       warn: "Отправьте Telegram ID пользователя для выдачи варна.",
       broadcast: "Отправьте текст объявления для всех пользователей бота. Для отмены отправьте /cancel."
@@ -555,6 +584,19 @@ function handleCallback(query) {
 function handleFlowMessage(message, flow) {
   const userId = message.from.id;
   const chatId = message.chat.id;
+  if (flow.type === "set_sticker") {
+    if (!isAdmin(userId)) {
+      clearFlow(userId);
+      return sendText(chatId, "Действие доступно только администраторам.");
+    }
+    const fileId = message.sticker && message.sticker.file_id;
+    if (!fileId) return sendText(chatId, "Это не стикер. Отправьте стикер или /cancel.");
+    PROP.setProperty("PUBLIC_STICKER_FILE_ID", fileId);
+    clearFlow(userId);
+    auditEvent("public_sticker_set", userId, "", "Обновлен стикер для пользователей.");
+    sendText(chatId, "Стикер сохранен и будет добавляться к сообщениям пользователям.");
+    return;
+  }
   const text = String(message.text || "").trim();
   if (!text) return sendText(chatId, "Отправьте текстовым сообщением.");
 
@@ -599,6 +641,8 @@ function handleFlowMessage(message, flow) {
   const targetId = text;
   if (flow.type === "hire") return hireModerator(chatId, userId, targetId);
   if (flow.type === "fire") return fireModerator(chatId, userId, targetId);
+  if (flow.type === "hire_admin") return hireAdmin(chatId, userId, targetId);
+  if (flow.type === "fire_admin") return fireAdmin(chatId, userId, targetId);
   if (flow.type === "ban") return banUser(chatId, userId, targetId, "Бан выдан администратором.");
   if (flow.type === "warn") return warnUser(chatId, userId, targetId);
   clearFlow(userId);
@@ -709,6 +753,99 @@ function fireModerator(chatId, adminId, targetId) {
   PROP.deleteProperty("moderator_" + targetId);
   clearFlow(adminId);
   sendText(chatId, existed ? "Права модератора сняты у " + targetId + "." : "Этот пользователь не был модератором.");
+}
+
+function hireAdmin(chatId, actingAdminId, targetId) {
+  if (!isValidTelegramId(targetId)) {
+    clearFlow(actingAdminId);
+    return sendText(chatId, "Нужен числовой Telegram ID.");
+  }
+  const admins = getAdminIds();
+  if (admins.indexOf(String(targetId)) !== -1) {
+    clearFlow(actingAdminId);
+    return sendText(chatId, "Этот пользователь уже администратор.");
+  }
+  admins.push(String(targetId));
+  saveAdminIds(admins);
+  PROP.deleteProperty("banned_" + targetId);
+  clearFlow(actingAdminId);
+  auditEvent("admin_hired", actingAdminId, targetId, "Выданы права администратора из панели.");
+  sendText(chatId, "Пользователю " + targetId + " выданы права администратора.");
+  try { sendText(targetId, "Вам выданы права администратора ETNFaceit. Панель: /admins"); }
+  catch (error) { console.error("Admin notification failed: " + error); }
+}
+
+function fireAdmin(chatId, actingAdminId, targetId) {
+  const admins = getAdminIds();
+  const removalError = getAdminRemovalError(admins, actingAdminId, targetId);
+  if (removalError) {
+    clearFlow(actingAdminId);
+    const messages = {
+      self: "Нельзя снять админку у самого себя.",
+      missing: "Этот пользователь не является администратором.",
+      last: "Нельзя снять права у последнего администратора."
+    };
+    return sendText(chatId, messages[removalError]);
+  }
+  saveAdminIds(admins.filter(function (id) { return id !== String(targetId); }));
+  clearFlow(actingAdminId);
+  auditEvent("admin_fired", actingAdminId, targetId, "Сняты права администратора из панели.");
+  sendText(chatId, "Права администратора сняты у " + targetId + ".");
+  try { sendText(targetId, "Ваши права администратора ETNFaceit сняты."); }
+  catch (error) { console.error("Admin removal notification failed: " + error); }
+}
+
+function toggleMaintenance(chatId, adminId) {
+  const enabled = !isMaintenanceEnabled();
+  PROP.setProperty("MAINTENANCE_MODE", enabled ? "1" : "0");
+  const notice = maintenanceMessage(enabled);
+  const recipients = getKnownUserIds();
+  let delivered = 0;
+  let failed = 0;
+  recipients.forEach(function (userId) {
+    try {
+      sendText(userId, notice);
+      delivered++;
+    } catch (error) {
+      failed++;
+      console.error("Maintenance notice failed for " + userId + ": " + error);
+    }
+  });
+  auditEvent("maintenance_toggled", adminId, "", "Режим " + (enabled ? "включен" : "выключен") + ".");
+  sendText(chatId, "Техработы " + (enabled ? "включены" : "выключены")
+    + ". Уведомлено: " + delivered + "; ошибок доставки: " + failed + ".");
+}
+
+function getKnownUserIds() {
+  const properties = PROP.getProperties();
+  return Object.keys(properties).filter(function (key) {
+    return key.indexOf("seen_") === 0;
+  }).map(function (key) { return key.slice(5); });
+}
+
+function isMaintenanceEnabled() {
+  return PROP.getProperty("MAINTENANCE_MODE") === "1";
+}
+
+function isStaff(userId) {
+  return isAdmin(userId) || isModerator(userId);
+}
+
+function shouldBlockForMaintenance(enabled, staff) {
+  return Boolean(enabled && !staff);
+}
+
+function getAdminRemovalError(adminIds, actingAdminId, targetId) {
+  const admins = adminIds.map(String);
+  if (String(actingAdminId) === String(targetId)) return "self";
+  if (admins.indexOf(String(targetId)) === -1) return "missing";
+  if (admins.length <= 1) return "last";
+  return "";
+}
+
+function maintenanceMessage(enabled) {
+  if (enabled === false) return "Технические работы завершены. Бот снова работает, можете отправлять новости.";
+  return "Технический перерыв: заливается обновление. Попробуйте воспользоваться ботом немного позже.";
 }
 
 function banUser(chatId, adminId, targetId, reason) {
@@ -843,6 +980,10 @@ function getAdminIds() {
   return parseAdminIds(PROP.getProperty("ADMIN_IDS") || "");
 }
 
+function saveAdminIds(adminIds) {
+  PROP.setProperty("ADMIN_IDS", parseAdminIds(adminIds.join(",")).join(","));
+}
+
 function parseAdminIds(value) {
   const ids = String(value).split(/[\s,]+/).filter(isValidTelegramId);
   return ids.filter(function (id, index) { return ids.indexOf(id) === index; });
@@ -892,6 +1033,10 @@ function clearFlow(userId) {
   PROP.deleteProperty("flow_" + userId);
 }
 
+function shouldAttachPublicSticker(chatId, adminUser, moderatorUser) {
+  return /^\d+$/.test(String(chatId)) && !adminUser && !moderatorUser;
+}
+
 function answerCallback(callbackId) {
   telegramRequest_("answerCallbackQuery", { callback_query_id: callbackId });
 }
@@ -899,7 +1044,18 @@ function answerCallback(callbackId) {
 function sendText(chatId, text, keyboard) {
   const payload = { chat_id: chatId, text: text, parse_mode: "HTML", disable_web_page_preview: true };
   if (keyboard) payload.reply_markup = { inline_keyboard: keyboard };
-  return telegramRequest_("sendMessage", payload);
+  const result = telegramRequest_("sendMessage", payload);
+  if (shouldAttachPublicSticker(chatId, isAdmin(chatId), isModerator(chatId))) {
+    const stickerId = PROP.getProperty("PUBLIC_STICKER_FILE_ID");
+    if (stickerId) {
+      try {
+        telegramRequest_("sendSticker", { chat_id: chatId, sticker: stickerId });
+      } catch (error) {
+        console.error("Public sticker delivery failed: " + error);
+      }
+    }
+  }
+  return result;
 }
 
 function telegramRequest_(method, payload) {
@@ -1053,6 +1209,32 @@ function runSelfTests() {
       run: function () {
         assertSelfTestFalse(canAccessQueue(true, true, "published"));
         assertSelfTestFalse(canAccessQueue(true, true, "anything"));
+      }
+    },
+    {
+      name: "Maintenance blocks users but not staff",
+      run: function () {
+        assertSelfTestTrue(shouldBlockForMaintenance(true, false));
+        assertSelfTestFalse(shouldBlockForMaintenance(true, true));
+        assertSelfTestFalse(shouldBlockForMaintenance(false, false));
+      }
+    },
+    {
+      name: "Admin removal protects self and last admin",
+      run: function () {
+        assertSelfTestEqual(getAdminRemovalError(["1"], "1", "1"), "self");
+        assertSelfTestEqual(getAdminRemovalError(["1"], "2", "1"), "last");
+        assertSelfTestEqual(getAdminRemovalError(["1"], "1", "2"), "missing");
+        assertSelfTestEqual(getAdminRemovalError(["1", "2"], "1", "2"), "");
+      }
+    },
+    {
+      name: "Sticker is sent only to public private chats",
+      run: function () {
+        assertSelfTestTrue(shouldAttachPublicSticker(12345, false, false));
+        assertSelfTestFalse(shouldAttachPublicSticker(12345, true, false));
+        assertSelfTestFalse(shouldAttachPublicSticker(12345, false, true));
+        assertSelfTestFalse(shouldAttachPublicSticker(-100123, false, false));
       }
     },
     {
