@@ -1011,15 +1011,17 @@ function clearFlow(userId) {
 function decoratePublicMessage(text, isPublicUser) {
   const message = String(text);
   if (!isPublicUser) return message;
-  const normalized = message.toLowerCase();
-  if (normalized.indexOf("техничес") !== -1 || normalized.indexOf("обновлен") !== -1) return "🛠️ " + message;
-  if (normalized.indexOf("добро пожаловать") !== -1) return "👋 " + message;
-  if (normalized.indexOf("правил") !== -1) return "📜 " + message;
-  if (/отклон|не найден|нельзя|ошиб|ограничен|забан|варн/.test(normalized)) return "⚠️ " + message;
-  if (/одобр|опублик|сохран|отправлена|успеш/.test(normalized)) return "✅ " + message;
-  if (normalized.indexOf("новост") !== -1) return "📰 " + message;
-  if (/отправьте|напишите|пришлите/.test(normalized)) return "✍️ " + message;
-  return "🎮 " + message;
+  const heading = message.split(/\r?\n/, 1)[0].replace(/<[^>]*>/g, "").toLowerCase().trim();
+  let emoji = "🎮";
+  if (/техничес|обновлен|перерыв/.test(heading)) emoji = "🚧";
+  else if (/добро пожаловать/.test(heading)) emoji = "🏁";
+  else if (/правил/.test(heading)) emoji = "📚";
+  else if (/провер|модерац|администратор/.test(heading)) emoji = "🔎";
+  else if (/публикац|опублик|одобрен/.test(heading)) emoji = "📣";
+  else if (/отклон|не найден|нельзя|ошиб|ограничен|забан|варн/.test(heading)) emoji = "🚫";
+  else if (/отправьте|напишите|пришлите/.test(heading)) emoji = "📝";
+  else if (/новост/.test(heading)) emoji = "🗞️";
+  return emoji + " " + message;
 }
 
 function answerCallback(callbackId) {
@@ -1211,9 +1213,11 @@ function runSelfTests() {
     {
       name: "Public messages receive visual emoji decoration",
       run: function () {
-        assertSelfTestTrue(decoratePublicMessage("Добро пожаловать в предложку", true).indexOf("👋 ") === 0);
-        assertSelfTestTrue(decoratePublicMessage("Технический перерыв", true).indexOf("🛠️ ") === 0);
-        assertSelfTestTrue(decoratePublicMessage("Отклонено", true).indexOf("⚠️ ") === 0);
+        assertSelfTestTrue(decoratePublicMessage("Добро пожаловать в предложку", true).indexOf("🏁 ") === 0);
+        assertSelfTestTrue(decoratePublicMessage("Технический перерыв", true).indexOf("🚧 ") === 0);
+        assertSelfTestTrue(decoratePublicMessage("Отклонено", true).indexOf("🚫 ") === 0);
+        assertSelfTestTrue(decoratePublicMessage("<b>Правила предложки</b>\nНовости ETN", true).indexOf("📚 ") === 0);
+        assertSelfTestTrue(decoratePublicMessage("Новость опубликована", true).indexOf("📣 ") === 0);
         assertSelfTestEqual(decoratePublicMessage("Панель администратора", false), "Панель администратора");
       }
     },
