@@ -847,8 +847,8 @@ function isValidDestination(value) {
   return /^(?:-?\d{1,20}|@[A-Za-z0-9_]{5,})$/.test(String(value));
 }
 
-function isValidWebAppUrl(value) {
-  return /^https:\/\/script\.google\.com\/macros\/s\/[^/?#]+\/exec$/.test(String(value).trim());
+function isValidWebhookUrl(value) {
+  return /^https:\/\/[^\s/?#]+(?:\/[^\s?#]*)?(?:\?[^\s#]*)?$/.test(String(value).trim());
 }
 
 function canAccessQueue(isAdminUser, isModeratorUser, status) {
@@ -884,16 +884,19 @@ function clearFlow(userId) {
 }
 
 function answerCallback(callbackId) {
-  telegramRequest("answerCallbackQuery", { callback_query_id: callbackId });
+  telegramRequest_("answerCallbackQuery", { callback_query_id: callbackId });
 }
 
 function sendText(chatId, text, keyboard) {
   const payload = { chat_id: chatId, text: text, parse_mode: "HTML", disable_web_page_preview: true };
   if (keyboard) payload.reply_markup = { inline_keyboard: keyboard };
-  return telegramRequest("sendMessage", payload);
+  return telegramRequest_("sendMessage", payload);
 }
 
-function telegramRequest(method, payload) {
+function telegramRequest_(method, payload) {
+  if (typeof method !== "string" || !method) {
+    throw new Error("Не указан метод Telegram API. Запускайте configureWebhook, а не внутреннюю функцию запроса.");
+  }
   const token = PROP.getProperty("BOT_TOKEN");
   if (!token) throw new Error("Укажите BOT_TOKEN в свойствах скрипта.");
   const response = UrlFetchApp.fetch(BOT_API + token + "/" + method, {
@@ -909,16 +912,16 @@ function telegramRequest(method, payload) {
 
 function configureWebhook() {
   const webAppUrl = WEB_APP_URL.trim();
-  if (!isValidWebAppUrl(webAppUrl)) {
-    throw new Error("Вставьте URL развернутого Apps Script веб-приложения в WEB_APP_URL в начале файла. URL должен заканчиваться на /exec.");
+  if (!isValidWebhookUrl(webAppUrl)) {
+    throw new Error("Вставьте публичный HTTPS URL Cloudflare в WEB_APP_URL в начале файла.");
   }
-  const result = telegramRequest("setWebhook", { url: webAppUrl });
+  const result = telegramRequest_("setWebhook", { url: webAppUrl });
   Logger.log("Webhook установлен: " + webAppUrl);
   return result;
 }
 
 function showWebhookInfo() {
-  const result = telegramRequest("getWebhookInfo", {});
+  const result = telegramRequest_("getWebhookInfo", {});
   Logger.log(JSON.stringify(result.result, null, 2));
   return result.result;
 }
@@ -987,17 +990,18 @@ function runSelfTests() {
       }
     },
     {
-      name: "Deployed Apps Script execution URL is accepted",
+      name: "Public HTTPS webhook URLs are accepted",
       run: function () {
-        assertSelfTestTrue(isValidWebAppUrl("https://script.google.com/macros/s/AbCdEf_123-xyz/exec"));
+        assertSelfTestTrue(isValidWebhookUrl("https://script.google.com/macros/s/AbCdEf_123-xyz/exec"));
+        assertSelfTestTrue(isValidWebhookUrl("https://etnfaceit.example.workers.dev/telegram/hook?key=abc123"));
       }
     },
     {
-      name: "Non-deployment and non-HTTPS URLs are rejected",
+      name: "Non-HTTPS and malformed webhook URLs are rejected",
       run: function () {
-        assertSelfTestFalse(isValidWebAppUrl("http://script.google.com/macros/s/id/exec"));
-        assertSelfTestFalse(isValidWebAppUrl("https://script.google.com/macros/s/id/dev"));
-        assertSelfTestFalse(isValidWebAppUrl("https://example.com/exec"));
+        assertSelfTestFalse(isValidWebhookUrl("http://worker.example/hook"));
+        assertSelfTestFalse(isValidWebhookUrl("ftp://worker.example/hook"));
+        assertSelfTestFalse(isValidWebhookUrl("not-a-url"));
       }
     },
     {
